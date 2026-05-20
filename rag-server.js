@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 
 /**
- * RAG (Retrieval-Augmented Generation) System with WebSocket Telemetry
- * Supports:
- *   - Real mode: Gemini embeddings, Chroma vector store, Novita inference
- *   - Mock mode: deterministic testing
- *   - WebSocket / SSE real-time dashboard events
+ * RAG System with WebSocket Telemetry
+ * - Real mode: Gemini embeddings, Chroma, Novita DeepSeek
+ * - Injection: clear + chunk + embed + store (no duplicates)
+ * - Conversation history (JSON file based) for /ask endpoint
+ * - Hardcoded input directory: ./input (can be changed via RAG_INPUT_DIR env)
  */
 
 const fs = require('fs');
@@ -13,230 +13,165 @@ const path = require('path');
 const http = require('http');
 const { EventEmitter } = require('events');
 
-// WebSocket support (optional)
+// WebSocket optional
 let WebSocketServer;
 try {
   const WebSocket = require('ws');
   WebSocketServer = WebSocket.Server;
 } catch (err) {
   console.warn('⚠️  ws package not installed. Install with: npm install ws');
-  console.warn('WebSocket support disabled. Using HTTP + SSE only.\n');
+  console.warn('WebSocket support disabled.\n');
 }
 
 // ============================================================================
-// EVENT SYSTEM FOR TELEMETRY
+// CONFIGURATION
 // ============================================================================
+const INPUT_DIR = process.env.RAG_INPUT_DIR || './input';
+const CHUNK_SIZE = parseInt(process.env.RAG_CHUNK_SIZE) || 1000;      // characters
+const CHUNK_OVERLAP = parseInt(process.env.RAG_CHUNK_OVERLAP) || 200;
+const CONVERSATIONS_DIR = './conversations';
+// Ensure directories exist
+if (!fs.existsSync(INPUT_DIR)) fs.mkdirSync(INPUT_DIR, { recursive: true });
+if (!fs.existsSync(CONVERSATIONS_DIR)) fs.mkdirSync(CONVERSATIONS_DIR, { recursive: true });
 
+// ============================================================================
+// EVENT SYSTEM (unchanged)
+// ============================================================================
 class ServerEvents extends EventEmitter {
   constructor() {
     super();
-    this.metrics = {
-      startTime: Date.now(),
-      requestsTotal: 0,
-      injectionTotal: 0,
-      retrievalTotal: 0,
-      embeddingsTotal: 0,
-      averageEmbeddingTime: 0,
-      averageRetrievalTime: 0,
-      averageInjectionTime: 0,
-      lastRequest: null,
-      lastInjection: null,
-      lastRetrieval: null,
-      errors: [],
-      connectedClients: 0
-    };
+    this.metrics = { startTime: Date.now(), requestsTotal: 0, injectionTotal: 0, retrievalTotal: 0, embeddingsTotal: 0, averageEmbeddingTime: 0, averageRetrievalTime: 0, averageInjectionTime: 0, lastRequest: null, lastInjection: null, lastRetrieval: null, errors: [], connectedClients: 0 };
     this.eventLog = [];
     this.maxLogSize = 1000;
   }
-
   logEvent(eventType, data = {}) {
-    const event = {
-      timestamp: Date.now(),
-      type: eventType,
-      data
-    };
+    const event = { timestamp: Date.now(), type: eventType, data };
     this.eventLog.push(event);
     if (this.eventLog.length > this.maxLogSize) this.eventLog.shift();
-
-    // Update metrics
     switch (eventType) {
-      case 'request:start':
-        this.metrics.requestsTotal++;
-        this.metrics.lastRequest = Date.now();
-        break;
-      case 'injection:start':
-        this.metrics.injectionTotal++;
-        this.metrics.lastInjection = Date.now();
-        break;
-      case 'retrieval:start':
-        this.metrics.retrievalTotal++;
-        this.metrics.lastRetrieval = Date.now();
-        break;
-      case 'embedding:complete':
-        this.metrics.embeddingsTotal++;
-        break;
-      case 'error':
-        this.metrics.errors.push({ timestamp: Date.now(), ...data });
-        if (this.metrics.errors.length > 100) this.metrics.errors.shift();
-        break;
+      case 'request:start': this.metrics.requestsTotal++; this.metrics.lastRequest = Date.now(); break;
+      case 'injection:start': this.metrics.injectionTotal++; this.metrics.lastInjection = Date.now(); break;
+      case 'retrieval:start': this.metrics.retrievalTotal++; this.metrics.lastRetrieval = Date.now(); break;
+      case 'embedding:complete': this.metrics.embeddingsTotal++; break;
+      case 'error': this.metrics.errors.push({ timestamp: Date.now(), ...data }); if (this.metrics.errors.length > 100) this.metrics.errors.shift(); break;
     }
     this.emit('event', event);
   }
+  getMetrics() { const uptime = Date.now() - this.metrics.startTime; return { ...this.metrics, uptime, uptimeFormatted: this._formatUptime(uptime) }; }
+  _formatUptime(ms) { const s = Math.floor(ms/1000), m = Math.floor(s/60), h = Math.floor(m/60), d = Math.floor(h/24); if (d) return `${d}d ${h%24}h`; if (h) return `${h}h ${m%60}m`; if (m) return `${m}m ${s%60}s`; return `${s}s`; }
+  incrementConnectedClients(delta = 1) { this.metrics.connectedClients = Math.max(0, this.metrics.connectedClients + delta); this.logEvent('client:connected', { clientCount: this.metrics.connectedClients }); }
+}
+const serverEvents = new ServerEvents();
 
-  getMetrics() {
-    const uptime = Date.now() - this.metrics.startTime;
-    return { ...this.metrics, uptime, uptimeFormatted: this._formatUptime(uptime) };
+// ============================================================================
+// CONVERSATION STORAGE (JSON file per session)
+// ============================================================================
+class ConversationStore {
+  constructor(sessionId) {
+    this.sessionId = sessionId;
+    this.filePath = path.join(CONVERSATIONS_DIR, `${sessionId}.json`);
+    this.messages = this._load();
   }
-
-  _formatUptime(ms) {
-    const s = Math.floor(ms / 1000);
-    const m = Math.floor(s / 60);
-    const h = Math.floor(m / 60);
-    const d = Math.floor(h / 24);
-    if (d) return `${d}d ${h % 24}h`;
-    if (h) return `${h}h ${m % 60}m`;
-    if (m) return `${m}m ${s % 60}s`;
-    return `${s}s`;
+  _load() {
+    if (fs.existsSync(this.filePath)) {
+      try { return JSON.parse(fs.readFileSync(this.filePath, 'utf8')); } catch(e) { return []; }
+    }
+    return [];
   }
-
-  incrementConnectedClients(delta = 1) {
-    this.metrics.connectedClients = Math.max(0, this.metrics.connectedClients + delta);
-    this.logEvent('client:connected', { clientCount: this.metrics.connectedClients });
+  _save() { fs.writeFileSync(this.filePath, JSON.stringify(this.messages, null, 2)); }
+  addMessage(role, content) {
+    this.messages.push({ role, content, timestamp: Date.now() });
+    this._save();
   }
+  getHistory(limit = 10) {
+    return this.messages.slice(-limit);
+  }
+  clear() { this.messages = []; this._save(); }
+  static getOrCreate(sessionId) { return new ConversationStore(sessionId); }
 }
 
-const serverEvents = new ServerEvents();
+// ============================================================================
+// TEXT CHUNKING UTILITY
+// ============================================================================
+function chunkText(text, maxSize = CHUNK_SIZE, overlap = CHUNK_OVERLAP) {
+  if (text.length <= maxSize) return [text];
+  const chunks = [];
+  let start = 0;
+  while (start < text.length) {
+    let end = start + maxSize;
+    if (end >= text.length) {
+      chunks.push(text.slice(start));
+      break;
+    }
+    // try to cut at paragraph or sentence boundary
+    let cut = text.lastIndexOf('\n\n', end);
+    if (cut <= start) cut = text.lastIndexOf('. ', end);
+    if (cut <= start) cut = text.lastIndexOf(' ', end);
+    if (cut <= start) cut = end;
+    chunks.push(text.slice(start, cut));
+    start = cut - overlap;
+    if (start < 0) start = 0;
+  }
+  return chunks;
+}
 
 // ============================================================================
 // ABSTRACT BASE CLASSES
 // ============================================================================
-
-class DocumentLoader {
-  async loadDocuments(folderPath) { throw new Error('loadDocuments() not implemented'); }
-}
-
-class Embedder {
-  async embed(text) { throw new Error('embed() not implemented'); }
-  async embedBatch(texts) { throw new Error('embedBatch() not implemented'); }
-}
-
-class VectorStore {
-  async store(id, embedding, metadata) { throw new Error('store() not implemented'); }
-  async query(queryEmbedding, topK) { throw new Error('query() not implemented'); }
-  async clear() { throw new Error('clear() not implemented'); }
-  async getStats() { throw new Error('getStats() not implemented'); }
-}
-
-class Retriever {
-  async retrieve(query, topK) { throw new Error('retrieve() not implemented'); }
-}
-
-class InjectionPipeline {
-  constructor(loader, embedder, store) { this.loader = loader; this.embedder = embedder; this.store = store; }
-  async run(folderPath) { throw new Error('run() not implemented'); }
-}
-
-class RetrievalPipeline {
-  constructor(embedder, store) { this.embedder = embedder; this.store = store; }
-  async run(query, topK) { throw new Error('run() not implemented'); }
-}
+class DocumentLoader { async loadDocuments(folderPath) { throw new Error('not implemented'); } }
+class Embedder { async embed(text) { throw new Error('not implemented'); } async embedBatch(texts) { throw new Error('not implemented'); } }
+class VectorStore { async store(id, embedding, metadata) { throw new Error('not implemented'); } async query(queryEmbedding, topK) { throw new Error('not implemented'); } async clear() { throw new Error('not implemented'); } async getStats() { throw new Error('not implemented'); } }
+class InjectionPipeline { constructor(loader, embedder, store) { this.loader = loader; this.embedder = embedder; this.store = store; } async run(folderPath) { throw new Error('not implemented'); } }
+class RetrievalPipeline { constructor(embedder, store) { this.embedder = embedder; this.store = store; } async run(query, topK) { throw new Error('not implemented'); } }
 
 // ============================================================================
-// MOCK IMPLEMENTATIONS (with telemetry)
+// MOCK IMPLEMENTATIONS (unchanged but updated to support chunking if needed)
 // ============================================================================
-
 class MockDocumentLoader extends DocumentLoader {
   constructor(mockDocs = null) {
     super();
     this.mockDocuments = mockDocs || [
-      { id: 'doc-1', content: 'Artificial Intelligence is transforming technology.', metadata: { file: 'ai.md', size: 50 } },
-      { id: 'doc-2', content: 'Machine Learning is a subset of AI.', metadata: { file: 'ml.md', size: 45 } },
-      { id: 'doc-3', content: 'Deep Learning uses neural networks.', metadata: { file: 'dl.md', size: 40 } }
+      { id: 'ai.md', content: 'Artificial Intelligence is transforming technology.', metadata: { file: 'ai.md' } },
+      { id: 'ml.md', content: 'Machine Learning is a subset of AI.', metadata: { file: 'ml.md' } },
+      { id: 'dl.md', content: 'Deep Learning uses neural networks.', metadata: { file: 'dl.md' } }
     ];
   }
   async loadDocuments(folderPath) { return this.mockDocuments; }
 }
 
 class MockEmbedder extends Embedder {
-  constructor() {
-    super();
-    this.callCount = 0;
-    this.cache = new Map();
-  }
-  _hashString(str) {
-    let hash = 0;
-    for (let i = 0; i < str.length; i++) {
-      hash = ((hash << 5) - hash) + str.charCodeAt(i);
-      hash = hash & hash;
-    }
-    return hash;
-  }
+  constructor() { super(); this.callCount = 0; this.cache = new Map(); }
+  _hashString(str) { let hash = 0; for (let i = 0; i < str.length; i++) hash = ((hash << 5) - hash) + str.charCodeAt(i); return hash & hash; }
   async embed(text) {
     this.callCount++;
     if (this.cache.has(text)) return this.cache.get(text);
     const seed = this._hashString(text);
-    const embedding = Array(384).fill(0).map((_, i) => {
-      const r = Math.sin(seed + i * 12.9898) * 43758.5453;
-      return r - Math.floor(r);
-    });
+    const embedding = Array(384).fill(0).map((_, i) => { const r = Math.sin(seed + i * 12.9898) * 43758.5453; return r - Math.floor(r); });
     this.cache.set(text, embedding);
-    serverEvents.logEvent('embedding:complete', { textLength: text.length, dimensions: 384, cached: false });
+    serverEvents.logEvent('embedding:complete', { textLength: text.length });
     return embedding;
   }
-  async embedBatch(texts) {
-    const start = Date.now();
-    const res = await Promise.all(texts.map(t => this.embed(t)));
-    serverEvents.logEvent('embedding:batch', { count: texts.length, duration: Date.now() - start });
-    return res;
-  }
+  async embedBatch(texts) { return Promise.all(texts.map(t => this.embed(t))); }
   getCallCount() { return this.callCount; }
 }
 
 class MockVectorStore extends VectorStore {
-  constructor() {
-    super();
-    this.docs = new Map();
-    this.queryCount = 0;
-  }
-  async store(id, embedding, metadata) {
-    this.docs.set(id, { embedding, metadata, ts: Date.now() });
-    serverEvents.logEvent('vectorstore:stored', { documentId: id, total: this.docs.size });
-  }
-  _cosineSimilarity(a, b) {
-    let dot = 0, normA = 0, normB = 0;
-    for (let i = 0; i < a.length; i++) {
-      dot += a[i] * b[i];
-      normA += a[i] * a[i];
-      normB += b[i] * b[i];
-    }
-    normA = Math.sqrt(normA); normB = Math.sqrt(normB);
-    return normA && normB ? dot / (normA * normB) : 0;
-  }
-  async query(queryEmbedding, topK = 5) {
-    const start = Date.now();
-    this.queryCount++;
-    const results = [];
-    for (const [id, { embedding, metadata }] of this.docs.entries()) {
-      results.push({ id, score: this._cosineSimilarity(queryEmbedding, embedding), metadata });
-    }
-    const sorted = results.sort((a,b) => b.score - a.score).slice(0, topK);
-    serverEvents.logEvent('vectorstore:queried', { queryCount: this.queryCount, resultsCount: sorted.length, duration: Date.now() - start, topK });
-    return sorted;
-  }
-  async clear() { this.docs.clear(); this.queryCount = 0; serverEvents.logEvent('vectorstore:cleared', {}); }
-  async getStats() { return { totalDocuments: this.docs.size, queryCount: this.queryCount, status: 'ready' }; }
+  constructor() { super(); this.docs = new Map(); this.queryCount = 0; }
+  async store(id, embedding, metadata) { this.docs.set(id, { embedding, metadata }); serverEvents.logEvent('vectorstore:stored', { id }); }
+  _cosineSimilarity(a,b) { let dot=0, normA=0, normB=0; for(let i=0;i<a.length;i++) { dot+=a[i]*b[i]; normA+=a[i]*a[i]; normB+=b[i]*b[i]; } normA=Math.sqrt(normA); normB=Math.sqrt(normB); return normA&&normB?dot/(normA*normB):0; }
+  async query(q, topK=5) { const start=Date.now(); this.queryCount++; const results=[]; for(const[id,{embedding,metadata}] of this.docs) results.push({id,score:this._cosineSimilarity(q,embedding),metadata}); const sorted=results.sort((a,b)=>b.score-a.score).slice(0,topK); serverEvents.logEvent('vectorstore:queried',{count:sorted.length,duration:Date.now()-start}); return sorted; }
+  async clear() { this.docs.clear(); this.queryCount=0; serverEvents.logEvent('vectorstore:cleared',{}); }
+  async getStats() { return { totalDocuments: this.docs.size, queryCount: this.queryCount }; }
 }
 
 // ============================================================================
-// REAL IMPLEMENTATIONS (with telemetry)
+// REAL IMPLEMENTATIONS (with chunking support in pipeline)
 // ============================================================================
-
 class RealDocumentLoader extends DocumentLoader {
   async loadDocuments(folderPath) {
     const resolved = path.resolve(folderPath);
     if (!fs.existsSync(resolved)) throw new Error(`Directory does not exist: ${folderPath}`);
     if (!fs.statSync(resolved).isDirectory()) throw new Error(`Not a directory: ${folderPath}`);
-
     const docs = [];
     const readDir = (dir) => {
       for (const file of fs.readdirSync(dir)) {
@@ -248,7 +183,7 @@ class RealDocumentLoader extends DocumentLoader {
           const rel = path.relative(resolved, full);
           docs.push({
             id: rel,
-            content,
+            content: content,
             metadata: { file, path: rel, size: stat.size, mtime: stat.mtimeMs }
           });
         }
@@ -264,21 +199,20 @@ class GeminiEmbedder extends Embedder {
   constructor(apiKey = null) {
     super();
     this.apiKey = apiKey || process.env.GEMINI_API_KEY || process.env.AI_STUDIO_API_KEY;
-    if (!this.apiKey) throw new Error('Gemini API key required. Set GEMINI_API_KEY or AI_STUDIO_API_KEY');
+    if (!this.apiKey) throw new Error('Gemini API key required');
     this.callCount = 0;
   }
   async embed(text) {
     this.callCount++;
     const start = Date.now();
     const res = await fetch(`https://generativelanguage.googleapis.com/v1/models/gemini-embedding-2:embedContent?key=${this.apiKey}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ content: { parts: [{ text }] } })
     });
     if (!res.ok) throw new Error(`Gemini API error: ${res.status}`);
     const data = await res.json();
     const embedding = data.embedding.values;
-    serverEvents.logEvent('embedding:complete', { textLength: text.length, dimensions: embedding.length, duration: Date.now() - start, cached: false });
+    serverEvents.logEvent('embedding:complete', { textLength: text.length, duration: Date.now()-start });
     return embedding;
   }
   async embedBatch(texts) {
@@ -286,24 +220,23 @@ class GeminiEmbedder extends Embedder {
     const chunkSize = 100;
     const results = [];
     for (let i = 0; i < texts.length; i += chunkSize) {
-      const chunk = texts.slice(i, i + chunkSize);
+      const chunk = texts.slice(i, i+chunkSize);
       const res = await fetch(`https://generativelanguage.googleapis.com/v1/models/gemini-embedding-2:batchEmbedContents?key=${this.apiKey}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ requests: chunk.map(t => ({ model: 'models/gemini-embedding-2', content: { parts: [{ text: t }] } })) })
       });
       if (!res.ok) throw new Error(`Gemini batch error: ${res.status}`);
       const data = await res.json();
       results.push(...data.embeddings.map(e => e.values));
     }
-    serverEvents.logEvent('embedding:batch', { count: texts.length, duration: Date.now() - start });
+    serverEvents.logEvent('embedding:batch', { count: texts.length, duration: Date.now()-start });
     return results;
   }
   getCallCount() { return this.callCount; }
 }
 
 class ChromaVectorStore extends VectorStore {
-  constructor(baseUrl = 'http://localhost:8000', collectionName = 'rag_documents', tenant = 'default_tenant', database = 'default_database') {
+  constructor(baseUrl='http://localhost:8000', collectionName='rag_documents', tenant='default_tenant', database='default_database') {
     super();
     this.baseUrl = baseUrl;
     this.collectionName = collectionName;
@@ -315,8 +248,7 @@ class ChromaVectorStore extends VectorStore {
     if (this.collectionId) return this.collectionId;
     await fetch(`${this.baseUrl}/api/v2/heartbeat`).catch(() => { throw new Error('Chroma unreachable'); });
     const res = await fetch(`${this.baseUrl}/api/v2/tenants/${this.tenant}/databases/${this.database}/collections`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name: this.collectionName, metadata: { "hnsw:space": "cosine" }, get_or_create: true })
     });
     if (!res.ok) throw new Error(`Chroma collection error: ${res.status}`);
@@ -330,19 +262,17 @@ class ChromaVectorStore extends VectorStore {
     const chromaMeta = { ...metadata };
     delete chromaMeta.content;
     const res = await fetch(`${this.baseUrl}/api/v2/tenants/${this.tenant}/databases/${this.database}/collections/${colId}/add`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ids: [id], embeddings: [embedding], metadatas: [chromaMeta], documents: [content] })
     });
     if (!res.ok) throw new Error(`Chroma add error: ${res.status}`);
-    serverEvents.logEvent('vectorstore:stored', { documentId: id, collection: this.collectionName });
+    serverEvents.logEvent('vectorstore:stored', { id });
   }
-  async query(queryEmbedding, topK = 5) {
+  async query(queryEmbedding, topK=5) {
     const start = Date.now();
     const colId = await this._ensureCollection();
     const res = await fetch(`${this.baseUrl}/api/v2/tenants/${this.tenant}/databases/${this.database}/collections/${colId}/query`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ query_embeddings: [queryEmbedding], n_results: topK, include: ['metadatas', 'documents', 'distances'] })
     });
     if (!res.ok) throw new Error(`Chroma query error: ${res.status}`);
@@ -357,13 +287,13 @@ class ChromaVectorStore extends VectorStore {
         });
       }
     }
-    serverEvents.logEvent('vectorstore:queried', { resultsCount: results.length, duration: Date.now() - start, topK });
+    serverEvents.logEvent('vectorstore:queried', { count: results.length, duration: Date.now()-start });
     return results;
   }
   async clear() {
     try {
       await fetch(`${this.baseUrl}/api/v2/tenants/${this.tenant}/databases/${this.database}/collections/${this.collectionName}`, { method: 'DELETE' });
-    } catch(e) { /* ignore */ }
+    } catch(e) {}
     this.collectionId = null;
     serverEvents.logEvent('vectorstore:cleared', {});
   }
@@ -382,53 +312,82 @@ class NovitaInference {
   constructor(apiKey = null, model = 'deepseek/deepseek-v4-pro') {
     this.apiKey = apiKey || process.env.NOVITA_API_KEY;
     this.model = model;
-    if (!this.apiKey) throw new Error('Novita API key required. Set NOVITA_API_KEY');
+    if (!this.apiKey) throw new Error('Novita API key required');
   }
-  async generateAnswer(query, contextDocuments) {
+  async generateAnswer(query, contextDocuments, conversationHistory = []) {
     const start = Date.now();
     const contextText = contextDocuments.map((doc, idx) =>
-      `[Document ${idx+1}] (${doc.metadata.file || doc.id})\n${doc.metadata.content || doc.content || ''}`
+      `[Document ${idx+1}] (${doc.metadata.file || doc.id})\n${doc.metadata.content || ''}`
     ).join('\n\n');
     const systemPrompt = `You are a helpful AI assistant. Use ONLY the provided context to answer. If unknown, say so.\n\nContext:\n${contextText}`;
+    const messages = [
+      { role: 'system', content: systemPrompt },
+      ...conversationHistory,
+      { role: 'user', content: query }
+    ];
     const res = await fetch('https://api.novita.ai/openai/v1/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.apiKey}` },
-      body: JSON.stringify({
-        model: this.model,
-        messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: query }],
-        temperature: 0.1, max_tokens: 1000
-      })
+      body: JSON.stringify({ model: this.model, messages, temperature: 0.1, max_tokens: 1000 })
     });
     if (!res.ok) throw new Error(`Novita error: ${res.status}`);
     const data = await res.json();
     const answer = data.choices[0].message.content;
-    serverEvents.logEvent('inference:complete', { queryLength: query.length, contextDocs: contextDocuments.length, duration: Date.now() - start });
+    serverEvents.logEvent('inference:complete', { queryLength: query.length, contextDocs: contextDocuments.length, duration: Date.now()-start });
     return answer;
   }
 }
 
 // ============================================================================
-// CONCRETE PIPELINES WITH TELEMETRY
+// CONCRETE PIPELINES (with clearing and chunking)
 // ============================================================================
-
 class ConcreteInjectionPipeline extends InjectionPipeline {
   async run(folderPath) {
     const start = Date.now();
     serverEvents.logEvent('injection:start', { folderPath });
     try {
+      // 1. Clear existing vectors
+      await this.store.clear();
+      serverEvents.logEvent('injection:cleared', {});
+
+      // 2. Load raw documents (whole files)
       const docs = await this.loader.loadDocuments(folderPath);
       if (!docs.length) throw new Error('No documents found');
       serverEvents.logEvent('injection:documents-loaded', { count: docs.length });
-      const texts = docs.map(d => d.content);
+
+      // 3. Chunk each document
+      const chunks = [];
+      for (const doc of docs) {
+        const textChunks = chunkText(doc.content, CHUNK_SIZE, CHUNK_OVERLAP);
+        for (let i = 0; i < textChunks.length; i++) {
+          chunks.push({
+            id: `${doc.id}_chunk_${i}`,
+            content: textChunks[i],
+            metadata: {
+              ...doc.metadata,
+              chunk_index: i,
+              total_chunks: textChunks.length,
+              original_id: doc.id
+            }
+          });
+        }
+      }
+      serverEvents.logEvent('injection:chunks-created', { totalChunks: chunks.length });
+
+      // 4. Embed all chunks
+      const texts = chunks.map(c => c.content);
       const embeddings = await this.embedder.embedBatch(texts);
       serverEvents.logEvent('injection:embeddings-generated', { count: embeddings.length });
-      for (let i = 0; i < docs.length; i++) {
-        await this.store.store(docs[i].id, embeddings[i], docs[i].metadata);
-        serverEvents.logEvent('injection:document-stored', { documentId: docs[i].id, progress: `${i+1}/${docs.length}` });
+
+      // 5. Store each chunk
+      for (let i = 0; i < chunks.length; i++) {
+        await this.store.store(chunks[i].id, embeddings[i], { ...chunks[i].metadata, content: chunks[i].content });
+        serverEvents.logEvent('injection:document-stored', { id: chunks[i].id, progress: `${i+1}/${chunks.length}` });
       }
+
       const duration = Date.now() - start;
-      serverEvents.logEvent('injection:complete', { documentsProcessed: docs.length, duration });
-      return { success: true, documentsProcessed: docs.length, duration: `${duration}ms` };
+      serverEvents.logEvent('injection:complete', { documentsProcessed: docs.length, chunksStored: chunks.length, duration });
+      return { success: true, documentsProcessed: docs.length, chunksStored: chunks.length, duration: `${duration}ms` };
     } catch (err) {
       serverEvents.logEvent('error', { stage: 'injection', message: err.message });
       return { success: false, error: err.message, duration: `${Date.now() - start}ms` };
@@ -451,11 +410,11 @@ class ConcreteRetrievalPipeline extends RetrievalPipeline {
         query,
         resultsCount: results.length,
         duration: `${duration}ms`,
-        results: results.map(r => ({ id: r.id, relevance: (r.score * 100).toFixed(2)+'%', metadata: r.metadata }))
+        results: results.map(r => ({ id: r.id, relevance: (r.score*100).toFixed(2)+'%', metadata: r.metadata }))
       };
     } catch (err) {
       serverEvents.logEvent('error', { stage: 'retrieval', message: err.message });
-      return { success: false, error: err.message, duration: `${Date.now() - start}ms` };
+      return { success: false, error: err.message, duration: `${Date.now()-start}ms` };
     }
   }
 }
@@ -463,7 +422,6 @@ class ConcreteRetrievalPipeline extends RetrievalPipeline {
 // ============================================================================
 // HTTP & WEBSOCKET SERVER
 // ============================================================================
-
 class RAGServer {
   constructor(port = 3000, isReal = false) {
     this.port = port;
@@ -492,12 +450,8 @@ class RAGServer {
       const loader = new MockDocumentLoader();
       this.injectionPipeline = new ConcreteInjectionPipeline(loader, embedder, store);
       this.retrievalPipeline = new ConcreteRetrievalPipeline(embedder, store);
-      // Preload mock documents
-      const docs = await loader.loadDocuments('/mock');
-      for (const doc of docs) {
-        const emb = await embedder.embed(doc.content);
-        await store.store(doc.id, emb, doc.metadata);
-      }
+      // Pre‑inject mock documents
+      await this.injectionPipeline.run('/mock');
       this.store = store;
     }
   }
@@ -508,30 +462,23 @@ class RAGServer {
     this.wsServer.on('connection', (ws) => {
       serverEvents.incrementConnectedClients(1);
       this.clients.add(ws);
-      // Send initial state
       ws.send(JSON.stringify({
         type: 'connection:established',
         data: { timestamp: Date.now(), metrics: serverEvents.getMetrics(), recentEvents: serverEvents.eventLog.slice(-20) }
       }));
-      const listener = (event) => {
-        if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'event', data: event }));
-      };
+      const listener = (event) => { if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'event', data: event })); };
       serverEvents.on('event', listener);
-      ws.on('message', (msg) => {
+      ws.on('message', async (msg) => {
         try {
           const payload = JSON.parse(msg);
-          this.handleWebSocketMessage(ws, payload);
+          await this.handleWebSocketMessage(ws, payload);
         } catch(e) { ws.send(JSON.stringify({ type: 'error', data: { message: 'Invalid JSON' } })); }
       });
-      ws.on('close', () => {
-        serverEvents.incrementConnectedClients(-1);
-        serverEvents.removeListener('event', listener);
-        this.clients.delete(ws);
-      });
+      ws.on('close', () => { serverEvents.incrementConnectedClients(-1); serverEvents.removeListener('event', listener); this.clients.delete(ws); });
     });
   }
 
-  handleWebSocketMessage(ws, payload) {
+  async handleWebSocketMessage(ws, payload) {
     switch (payload.type) {
       case 'request:metrics':
         ws.send(JSON.stringify({ type: 'metrics', data: serverEvents.getMetrics() }));
@@ -540,18 +487,40 @@ class RAGServer {
         ws.send(JSON.stringify({ type: 'event-log', data: serverEvents.eventLog }));
         break;
       case 'request:stats':
-        this.store.getStats().then(stats => ws.send(JSON.stringify({ type: 'stats', data: stats })));
+        const stats = await this.store.getStats();
+        ws.send(JSON.stringify({ type: 'stats', data: stats }));
         break;
       case 'request:inject':
-        this.injectionPipeline.run(payload.folderPath || (this.isReal ? './examples' : '/mock'))
-          .then(res => ws.send(JSON.stringify({ type: 'inject:result', data: res })));
+        // Clear + inject from INPUT_DIR
+        const injectResult = await this.injectionPipeline.run(INPUT_DIR);
+        ws.send(JSON.stringify({ type: 'inject:result', data: injectResult }));
         break;
-      case 'request:clear':
-        this.store.clear().then(() => ws.send(JSON.stringify({ type: 'clear:result', data: { success: true } })));
+      case 'request:clear':  // legacy direct clear (still works)
+        await this.store.clear();
+        ws.send(JSON.stringify({ type: 'clear:result', data: { success: true } }));
         break;
       case 'request:retrieve':
-        this.retrievalPipeline.run(payload.query, payload.topK || 5)
-          .then(res => ws.send(JSON.stringify({ type: 'retrieve:result', data: res })));
+        const retrieval = await this.retrievalPipeline.run(payload.query, payload.topK || 5);
+        ws.send(JSON.stringify({ type: 'retrieve:result', data: retrieval }));
+        break;
+      case 'request:ask':
+        // Expect payload: { query, sessionId, topK? }
+        const sessionId = payload.sessionId || `anon_${Date.now()}_${Math.random().toString(36).substr(2, 8)}`;
+        const conv = ConversationStore.getOrCreate(sessionId);
+        const history = conv.getHistory(10);
+        // 1. Retrieve context
+        const retrievalAsk = await this.retrievalPipeline.run(payload.query, payload.topK || 3);
+        if (!retrievalAsk.success) throw new Error(retrievalAsk.error);
+        const contextDocs = retrievalAsk.results.map(r => ({ id: r.id, content: r.metadata.content || '', metadata: r.metadata }));
+        // 2. Generate answer with history
+        const answer = await this.inference.generateAnswer(payload.query, contextDocs, history);
+        // 3. Store in history
+        conv.addMessage('user', payload.query);
+        conv.addMessage('assistant', answer);
+        ws.send(JSON.stringify({
+          type: 'ask:result',
+          data: { success: true, query: payload.query, answer, sources: retrievalAsk.results, sessionId }
+        }));
         break;
       case 'ping':
         ws.send(JSON.stringify({ type: 'pong', timestamp: Date.now() }));
@@ -572,18 +541,20 @@ class RAGServer {
     if (url === '/' && req.method === 'GET') {
       res.writeHead(200);
       res.end(JSON.stringify({
-        message: `RAG Server (${this.isReal ? 'REAL' : 'MOCK'}) with WebSocket Telemetry`,
+        message: `RAG Server (${this.isReal ? 'REAL' : 'MOCK'}) with Injection, Chunking & Conversation History`,
+        inputDirectory: INPUT_DIR,
+        chunkSize: CHUNK_SIZE,
         endpoints: {
           'GET /': 'Info',
           'GET /health': 'Health check',
           'GET /metrics': 'Server metrics',
           'GET /events': 'Server-Sent Events (SSE)',
           'GET /stats': 'Vector store stats',
-          'POST /inject': 'Inject documents (body: {folderPath})',
+          'POST /inject': 'Clear + inject documents from input directory (body: {})',
           'POST /retrieve': 'Retrieve documents (body: {query, topK})',
-          'POST /ask': 'Full RAG (query → context → answer)',
-          'POST /clear': 'Clear vector store',
-          'WS /ws': 'WebSocket endpoint'
+          'POST /ask': 'Full RAG with conversation history (body: {query, sessionId?, topK?})',
+          'POST /clear': 'Clear vector store (without re‑inject)',
+          'WS /ws': 'WebSocket endpoint (supports request:inject, request:ask, etc.)'
         }
       }, null, 2));
     }
@@ -607,15 +578,13 @@ class RAGServer {
       req.on('close', () => { serverEvents.removeListener('event', listener); serverEvents.incrementConnectedClients(-1); res.end(); });
     }
     else if (url === '/inject' && req.method === 'POST') {
-      let body = '';
-      req.on('data', c => body += c);
-      req.on('end', async () => {
-        try {
-          const { folderPath } = JSON.parse(body);
-          const result = await this.injectionPipeline.run(folderPath || (this.isReal ? './examples' : '/mock'));
-          res.writeHead(200);
-          res.end(JSON.stringify(result, null, 2));
-        } catch(e) { res.writeHead(400); res.end(JSON.stringify({ error: e.message })); }
+      // Clear + inject from INPUT_DIR
+      this.injectionPipeline.run(INPUT_DIR).then(result => {
+        res.writeHead(200);
+        res.end(JSON.stringify(result, null, 2));
+      }).catch(err => {
+        res.writeHead(500);
+        res.end(JSON.stringify({ error: err.message }));
       });
     }
     else if (url === '/clear' && req.method === 'POST') {
@@ -638,15 +607,21 @@ class RAGServer {
       req.on('data', c => body += c);
       req.on('end', async () => {
         try {
-          const { query, topK = 3 } = JSON.parse(body);
+          const { query, sessionId, topK = 3 } = JSON.parse(body);
+          const sid = sessionId || `http_${Date.now()}_${Math.random().toString(36).substr(2, 8)}`;
+          const conv = ConversationStore.getOrCreate(sid);
+          const history = conv.getHistory(10);
+          // 1. Retrieve
           const retrieval = await this.retrievalPipeline.run(query, topK);
           if (!retrieval.success) throw new Error(retrieval.error);
           const contextDocs = retrieval.results.map(r => ({ id: r.id, content: r.metadata.content || '', metadata: r.metadata }));
-          let answer = '';
-          if (this.inference) answer = await this.inference.generateAnswer(query, contextDocs);
-          else answer = `Mock answer based on ${contextDocs.length} docs: ${contextDocs.map(d => d.id).join(', ')}`;
+          // 2. Generate
+          const answer = await this.inference.generateAnswer(query, contextDocs, history);
+          // 3. Save
+          conv.addMessage('user', query);
+          conv.addMessage('assistant', answer);
           res.writeHead(200);
-          res.end(JSON.stringify({ success: true, query, answer, sources: retrieval.results }, null, 2));
+          res.end(JSON.stringify({ success: true, query, answer, sources: retrieval.results, sessionId: sid }, null, 2));
         } catch(e) { res.writeHead(400); res.end(JSON.stringify({ error: e.message })); }
       });
     }
@@ -661,22 +636,77 @@ class RAGServer {
     this.setupWebSocket();
     this.server.listen(this.port, () => {
       console.log(`\n🚀 RAG Server running on http://localhost:${this.port} [${this.isReal ? 'REAL' : 'MOCK'}]`);
+      console.log(`📂 Input directory: ${INPUT_DIR}`);
+      console.log(`✂️  Chunk size: ${CHUNK_SIZE} (overlap: ${CHUNK_OVERLAP})`);
+      console.log(`💬 Conversation storage: ${CONVERSATIONS_DIR}`);
       console.log(`📡 WebSocket: ${WebSocketServer ? `ws://localhost:${this.port}` : 'disabled'}`);
-      console.log(`📡 SSE events: http://localhost:${this.port}/events`);
-      console.log(`📊 Metrics: http://localhost:${this.port}/metrics\n`);
+      console.log(`📡 SSE events: http://localhost:${this.port}/events\n`);
     });
   }
-
   stop() { if (this.server) this.server.close(); }
 }
 
-// ============================================================================
-// TEST SUITES (unchanged from original except event emissions are safe)
-// ============================================================================
 
-class TestRunner { /* keep original implementation, omitted for brevity but fully functional */ }
-async function setupTests() { /* original mock tests - they will still pass */ }
-async function setupRealTests() { /* original real tests - they will still pass */ }
+async function setupRealTests() {
+  const runner = new TestRunner();
+
+  // Test 1: RealDocumentLoader loading files
+  runner.test('RealDocumentLoader should load md files', async (assert) => {
+    const loader = new RealDocumentLoader();
+    const docs = await loader.loadDocuments('./examples');
+    await assert.assertTrue(docs.length > 0, 'Should load files from examples');
+    await assert.assertTrue(docs.some(d => d.id.endsWith('.md') || d.metadata.file.endsWith('.md')), 'Should find .md files');
+  });
+
+  // Test 2: GeminiEmbedder generates embedding
+  runner.test('GeminiEmbedder should generate real embeddings', async (assert) => {
+    const embedder = new GeminiEmbedder();
+    const embedding = await embedder.embed('Testing real embedding generation');
+    await assert.assertTrue(Array.isArray(embedding), 'Embedding should be an array');
+    await assert.assertTrue(embedding.length > 0, 'Embedding should have non-zero length');
+  });
+
+  // Test 3: ChromaVectorStore connectivity & reset
+  runner.test('ChromaVectorStore should connect, store, and query', async (assert) => {
+    const store = new ChromaVectorStore();
+    await store.clear(); // Clear database
+    
+    const embedder = new GeminiEmbedder();
+    const text = 'Node.js is built on Chrome V8 engine';
+    const emb = await embedder.embed(text);
+    
+    await store.store('test-node-doc', emb, { file: 'v8.md', content: text });
+    
+    const stats = await store.getStats();
+    await assert.assertEqual(stats.totalDocuments, 1, 'Should store 1 document');
+    
+    const queryEmb = await embedder.embed('Chrome V8');
+    const results = await store.query(queryEmb, 1);
+    await assert.assertEqual(results.length, 1, 'Should return 1 result');
+    await assert.assertEqual(results[0].id, 'test-node-doc', 'Should match document ID');
+    await assert.assertTrue(results[0].score > 0.5, 'Should have high similarity score');
+    await assert.assertEqual(results[0].metadata.content, text, 'Should return stored content');
+  });
+
+  // Test 4: NovitaInference deepseek answering
+  runner.test('NovitaInference should generate answers from context', async (assert) => {
+    const inference = new NovitaInference();
+    const context = [
+      {
+        id: 'test-node-doc',
+        metadata: {
+          file: 'v8.md',
+          content: 'Node.js is built on Chrome V8 engine'
+        }
+      }
+    ];
+    
+    const answer = await inference.generateAnswer('What engine is Node.js built on?', context);
+    await assert.assertTrue(answer.toLowerCase().includes('v8') || answer.toLowerCase().includes('chrome'), 'Answer should mention V8 engine');
+  });
+
+  return runner;
+}
 
 // ============================================================================
 // MAIN
@@ -703,7 +733,7 @@ async function main() {
   } else {
     console.log(`
 ╔══════════════════════════════════════════════════════════════╗
-║   RAG System with WebSocket Telemetry (Real + Mock)         ║
+║   RAG System with WebSocket + Chunking + Conversation       ║
 ╚══════════════════════════════════════════════════════════════╝
 
 Usage:
@@ -713,14 +743,16 @@ Usage:
   node rag-server.js --server --real      Start real server (Gemini+Chroma+Novita)
   node rag-server.js --server --port 8080 Use custom port
 
-Real mode requires:
-  - ChromaDB running at http://localhost:8000 (Docker: chromadb/chroma)
-  - GEMINI_API_KEY or AI_STUDIO_API_KEY env var
-  - NOVITA_API_KEY env var
+Environment variables:
+  RAG_INPUT_DIR     = ./input   (directory with .md files)
+  RAG_CHUNK_SIZE    = 1000      (characters per chunk)
+  RAG_CHUNK_OVERLAP = 200
+  GEMINI_API_KEY    = ...
+  NOVITA_API_KEY    = ...
     `);
   }
 }
 
 if (require.main === module) main().catch(e => { console.error(e); process.exit(1); });
 
-module.exports = { RAGServer, serverEvents, /* all classes for external use */ };
+module.exports = { RAGServer, serverEvents, ConversationStore, chunkText };
