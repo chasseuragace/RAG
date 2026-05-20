@@ -1,0 +1,32 @@
+{
+  "name": "rag-system-poc",
+  "version": "1.0.0",
+  "description": "RAG (Retrieval-Augmented Generation) System - Phase 1 POC with zero dependencies",
+  "main": "rag-server.js",
+  "type": "commonjs",
+  "scripts": {
+    "test": "node rag-server.js --test",
+    "server": "node rag-server.js --server",
+    "dev": "node rag-server.js --server --port 3000",
+    "help": "node rag-server.js"
+  },
+  "keywords": [
+    "rag",
+    "retrieval-augmented-generation",
+    "vector-search",
+    "embeddings",
+    "ai",
+    "llm",
+    "gemini",
+    "deepseek"
+  ],
+  "author": "Your Name",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourusername/rag-system"
+  }
+}
