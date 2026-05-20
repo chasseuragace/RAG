@@ -538,25 +538,31 @@ class RAGServer {
     if (req.method === 'OPTIONS') { res.writeHead(200); res.end(); return; }
 
     const url = req.url;
+
+    // --- static files ---
+    const publicDir = path.join(__dirname, 'public');
+    const cleanUrl = url.split('?')[0];
+    const filePath = path.join(publicDir, cleanUrl);
+    if (filePath.startsWith(publicDir) && fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
+        const ext = path.extname(filePath).toLowerCase();
+        const mimeTypes = { '.html': 'text/html', '.css': 'text/css', '.js': 'application/javascript', '.json': 'application/json', '.png': 'image/png', '.jpg': 'image/jpeg', '.ico': 'image/x-icon' };
+        const contentType = mimeTypes[ext] || 'application/octet-stream';
+        res.writeHead(200, { 'Content-Type': contentType });
+        fs.createReadStream(filePath).pipe(res);
+        return;
+    }
+
+    // --- API endpoints ---
     if (url === '/' && req.method === 'GET') {
-      res.writeHead(200);
-      res.end(JSON.stringify({
-        message: `RAG Server (${this.isReal ? 'REAL' : 'MOCK'}) with Injection, Chunking & Conversation History`,
-        inputDirectory: INPUT_DIR,
-        chunkSize: CHUNK_SIZE,
-        endpoints: {
-          'GET /': 'Info',
-          'GET /health': 'Health check',
-          'GET /metrics': 'Server metrics',
-          'GET /events': 'Server-Sent Events (SSE)',
-          'GET /stats': 'Vector store stats',
-          'POST /inject': 'Clear + inject documents from input directory (body: {})',
-          'POST /retrieve': 'Retrieve documents (body: {query, topK})',
-          'POST /ask': 'Full RAG with conversation history (body: {query, sessionId?, topK?})',
-          'POST /clear': 'Clear vector store (without re‑inject)',
-          'WS /ws': 'WebSocket endpoint (supports request:inject, request:ask, etc.)'
+        const dashboardPath = path.join(__dirname, 'public', 'dashboard.html');
+        if (fs.existsSync(dashboardPath)) {
+            res.writeHead(302, { 'Location': '/dashboard.html' });
+            res.end();
+            return;
         }
-      }, null, 2));
+        res.writeHead(200);
+        res.end(JSON.stringify({ message: 'RAG Server', dashboard: '/dashboard.html' }, null, 2));
+        return;
     }
     else if (url === '/health' && req.method === 'GET') {
       res.writeHead(200);

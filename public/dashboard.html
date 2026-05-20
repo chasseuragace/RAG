@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RAG Dashboard – Real‑time Telemetry & Chat</title>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f9fafb; color: #1f2937; }
+        .dashboard-container { min-height: 100vh; background: #f9fafb; }
+        .dashboard-header { background: #1f2937; color: white; padding: 24px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); position: sticky; top: 0; z-index: 100; }
+        .header-content { max-width: 1400px; margin: 0 auto; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 16px; }
+        .header-title { font-size: 28px; font-weight: 700; }
+        .status-badges { display: flex; gap: 12px; }
+        .badge { padding: 6px 12px; border-radius: 6px; font-size: 13px; font-weight: 500; color: white; }
+        .badge.connected { background: #10b981; }
+        .badge.disconnected { background: #ef4444; }
+        .badge.warning { background: #f59e0b; }
+        .main-content { max-width: 1400px; margin: 0 auto; padding: 24px; }
+        .section { background: white; border-radius: 8px; padding: 24px; margin-bottom: 24px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+        .section-title { margin: 0 0 16px 0; font-size: 20px; font-weight: 600; }
+        .event-header { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 16px; }
+        .button-group { display: flex; gap: 8px; flex-wrap: wrap; }
+        .btn { padding: 8px 16px; background: #3b82f6; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 14px; font-weight: 500; transition: background 0.2s; }
+        .btn:hover { background: #2563eb; }
+        .btn.danger { background: #ef4444; }
+        .btn.danger:hover { background: #dc2626; }
+        .btn.secondary { background: #6b7280; }
+        .btn.secondary:hover { background: #4b5563; }
+        .metrics-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; }
+        .metric-card { display: flex; align-items: center; gap: 12px; padding: 16px; background: #f3f4f6; border-radius: 6px; border: 1px solid #e5e7eb; cursor: pointer; transition: transform 0.2s; }
+        .metric-card:hover { transform: translateY(-2px); }
+        .metric-icon { font-size: 24px; }
+        .metric-content { flex: 1; }
+        .metric-label { font-size: 12px; color: #6b7280; font-weight: 500; margin-bottom: 4px; }
+        .metric-value { font-size: 20px; font-weight: 700; }
+        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; }
+        .stat-box { padding: 16px; background: #f9fafb; border-left: 4px solid #3b82f6; border-radius: 4px; border: 1px solid #e5e7eb; }
+        .stat-label { font-size: 12px; color: #6b7280; margin-bottom: 4px; }
+        .stat-value { font-size: 24px; font-weight: 700; }
+        .event-container { max-height: 600px; overflow-y: auto; display: flex; flex-direction: column-reverse; gap: 8px; }
+        .event-item { display: flex; justify-content: space-between; align-items: center; padding: 12px; border-radius: 6px; border-left: 4px solid #3b82f6; cursor: pointer; background: white; border: 1px solid #e5e7eb; margin-bottom: 4px; }
+        .event-item:hover { background: #f3f4f6; }
+        .event-item.selected { background: #f3f4f6; }
+        .event-item-content { flex: 1; }
+        .event-type { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+        .event-type-badge { display: inline-block; padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; color: white; }
+        .event-time { font-size: 11px; color: #9ca3af; }
+        .event-preview { font-size: 12px; color: #6b7280; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .event-index { font-size: 12px; color: #d1d5db; font-weight: 600; min-width: 30px; text-align: right; }
+        .event-details-code { background: #1f2937; color: #10b981; padding: 16px; border-radius: 6px; font-size: 12px; font-family: monospace; overflow-x: auto; margin: 0; max-height: 400px; }
+        .answer-box { background: #f0fdf4; border-left: 4px solid #10b981; padding: 16px; border-radius: 6px; margin-top: 16px; }
+        .answer-title { font-weight: 600; margin-bottom: 8px; color: #047857; }
+        .answer-content { white-space: pre-wrap; font-size: 14px; }
+        .sources { margin-top: 12px; font-size: 12px; color: #6b7280; }
+        .empty-state { text-align: center; padding: 40px 20px; color: #9ca3af; }
+        .loading { text-align: center; padding: 20px; color: #6b7280; }
+        @media (max-width: 640px) { .header-content { flex-direction: column; align-items: flex-start; } .button-group { width: 100%; justify-content: space-between; } }
+    </style>
+</head>
+<body>
+<div id="root"></div>
+
+<script>
+    const { useState, useEffect, useRef } = React;
+
+    const Dashboard = () => {
+        const [metrics, setMetrics] = useState(null);
+        const [events, setEvents] = useState([]);
+        const [connected, setConnected] = useState(false);
+        const [wsConnected, setWsConnected] = useState(false);
+        const [serverStats, setServerStats] = useState(null);
+        const [selectedEvent, setSelectedEvent] = useState(null);
+        const [lastAnswer, setLastAnswer] = useState(null);
+        const wsRef = useRef(null);
+
+        // Helper: get server host (same as page origin)
+        const getHost = () => window.location.hostname;
+        const getPort = () => 3000; // default RAG server port
+
+        useEffect(() => {
+            connectWebSocket();
+            const metricsInterval = setInterval(() => {
+                if (wsRef.current && wsRef.current.readyState === 1) {
+                    sendWS({ type: 'request:metrics' });
+                    sendWS({ type: 'request:stats' });
+                } else {
+                    fetchMetricsHttp();
+                    fetchStatsHttp();
+                }
+            }, 2000);
+            return () => {
+                clearInterval(metricsInterval);
+                if (wsRef.current) wsRef.current.close();
+            };
+        }, []);
+
+        const connectWebSocket = () => {
+            const wsUrl = `ws://${getHost()}:${getPort()}`;
+            const ws = new WebSocket(wsUrl);
+            wsRef.current = ws;
+
+            ws.onopen = () => {
+                console.log('✅ WebSocket connected');
+                setWsConnected(true);
+                setConnected(true);
+                // Request initial data
+                sendWS({ type: 'request:metrics' });
+                sendWS({ type: 'request:stats' });
+                sendWS({ type: 'request:event-log' });
+            };
+            ws.onmessage = (event) => {
+                try {
+                    const msg = JSON.parse(event.data);
+                    handleWSMessage(msg);
+                } catch(e) { console.error('WS parse error', e); }
+            };
+            ws.onclose = () => { setWsConnected(false); console.log('WS closed'); };
+            ws.onerror = (err) => { console.error('WS error', err); setWsConnected(false); };
+        };
+
+        const sendWS = (payload) => {
+            if (wsRef.current && wsRef.current.readyState === 1) {
+                wsRef.current.send(JSON.stringify(payload));
+            } else {
+                console.warn('WebSocket not ready');
+            }
+        };
+
+        const handleWSMessage = (msg) => {
+            switch (msg.type) {
+                case 'connection:established':
+                    setMetrics(msg.data.metrics);
+                    setEvents(msg.data.recentEvents || []);
+                    break;
+                case 'event':
+                    setEvents(prev => {
+                        const updated = [...prev, msg.data];
+                        if (updated.length > 200) updated.shift();
+                        return updated;
+                    });
+                    break;
+                case 'metrics':
+                    setMetrics(msg.data);
+                    setConnected(true);
+                    break;
+                case 'stats':
+                    setServerStats(msg.data);
+                    break;
+                case 'event-log':
+                    setEvents(msg.data);
+                    break;
+                case 'inject:result':
+                    console.log('Injection result:', msg.data);
+                    if (msg.data.success) alert(`✅ Injection complete: ${msg.data.chunksStored || msg.data.documentsProcessed} chunks stored.`);
+                    else alert(`❌ Injection failed: ${msg.data.error}`);
+                    break;
+                case 'retrieve:result':
+                    console.log('Retrieve result:', msg.data);
+                    alert(`Retrieved ${msg.data.resultsCount} documents.\nCheck console for details.`);
+                    break;
+                case 'ask:result':
+                    setLastAnswer(msg.data);
+                    alert(`Answer received for session "${msg.data.sessionId || 'anon'}"`);
+                    break;
+                case 'clear:result':
+                    alert('Vector store cleared.');
+                    break;
+                case 'error':
+                    console.error('Server error:', msg.data);
+                    alert(`Error: ${msg.data.message}`);
+                    break;
+                default:
+                    console.log('Unhandled WS message:', msg.type);
+            }
+        };
+
+        const fetchMetricsHttp = async () => {
+            try {
+                const res = await fetch(`http://${getHost()}:${getPort()}/metrics`);
+                if (res.ok) { const data = await res.json(); setMetrics(data); setConnected(true); }
+                else setConnected(false);
+            } catch(e) { setConnected(false); }
+        };
+        const fetchStatsHttp = async () => {
+            try {
+                const res = await fetch(`http://${getHost()}:${getPort()}/stats`);
+                if (res.ok) setServerStats(await res.json());
+            } catch(e) {}
+        };
+
+        const handleInject = () => {
+            if (confirm('⚠️ This will CLEAR the entire vector store and re‑inject all .md files from ./input/ directory. Continue?')) {
+                sendWS({ type: 'request:inject' });
+            }
+        };
+        const handleClear = () => {
+            if (confirm('Clear vector store without re‑injecting?')) sendWS({ type: 'request:clear' });
+        };
+        const handleRetrieve = () => {
+            const query = prompt('Enter search query:');
+            if (query) sendWS({ type: 'request:retrieve', query, topK: 5 });
+        };
+        const handleAsk = () => {
+            const query = prompt('Ask a question:');
+            if (!query) return;
+            const sessionId = prompt('Session ID (leave blank for new session):', '');
+            sendWS({
+                type: 'request:ask',
+                query,
+                sessionId: sessionId || undefined,
+                topK: 3
+            });
+        };
+
+        const getEventColor = (type) => {
+            if (type.includes('complete') || type.includes('stored')) return '#10b981';
+            if (type.includes('error')) return '#ef4444';
+            if (type.includes('start')) return '#3b82f6';
+            if (type.includes('queried') || type.includes('retrieved')) return '#f59e0b';
+            if (type.includes('embedding')) return '#8b5cf6';
+            return '#6b7280';
+        };
+
+        return React.createElement('div', { className: 'dashboard-container' },
+            React.createElement('header', { className: 'dashboard-header' },
+                React.createElement('div', { className: 'header-content' },
+                    React.createElement('h1', { className: 'header-title' }, '🤖 RAG Server Dashboard'),
+                    React.createElement('div', { className: 'status-badges' },
+                        React.createElement('div', { className: `badge ${connected ? 'connected' : 'disconnected'}` }, connected ? '✓ Connected' : '✗ HTTP Offline'),
+                        React.createElement('div', { className: `badge ${wsConnected ? 'connected' : 'warning'}` }, wsConnected ? '⚡ WebSocket' : '⚠️ WS Offline')
+                    )
+                )
+            ),
+            React.createElement('main', { className: 'main-content' },
+                // Action Buttons
+                React.createElement('section', { className: 'section' },
+                    React.createElement('div', { className: 'button-group' },
+                        React.createElement('button', { className: 'btn', onClick: handleInject }, '📥 Inject (clear + load ./input)'),
+                        React.createElement('button', { className: 'btn', onClick: handleRetrieve }, '🔍 Retrieve'),
+                        React.createElement('button', { className: 'btn', onClick: handleAsk }, '💬 Ask (RAG + history)'),
+                        React.createElement('button', { className: 'btn danger', onClick: handleClear }, '🗑️ Clear store')
+                    )
+                ),
+
+                // Metrics
+                React.createElement('section', { className: 'section' },
+                    React.createElement('h2', { className: 'section-title' }, '📊 Server Metrics'),
+                    metrics ? React.createElement('div', { className: 'metrics-grid' },
+                        React.createElement('div', { className: 'metric-card' }, React.createElement('div', { className: 'metric-icon' }, '⏱️'), React.createElement('div', { className: 'metric-content' }, React.createElement('div', { className: 'metric-label' }, 'Uptime'), React.createElement('div', { className: 'metric-value' }, metrics.uptimeFormatted))),
+                        React.createElement('div', { className: 'metric-card' }, React.createElement('div', { className: 'metric-icon' }, '📨'), React.createElement('div', { className: 'metric-content' }, React.createElement('div', { className: 'metric-label' }, 'Requests'), React.createElement('div', { className: 'metric-value' }, metrics.requestsTotal))),
+                        React.createElement('div', { className: 'metric-card' }, React.createElement('div', { className: 'metric-icon' }, '💾'), React.createElement('div', { className: 'metric-content' }, React.createElement('div', { className: 'metric-label' }, 'Injections'), React.createElement('div', { className: 'metric-value' }, metrics.injectionTotal))),
+                        React.createElement('div', { className: 'metric-card' }, React.createElement('div', { className: 'metric-icon' }, '🔍'), React.createElement('div', { className: 'metric-content' }, React.createElement('div', { className: 'metric-label' }, 'Retrievals'), React.createElement('div', { className: 'metric-value' }, metrics.retrievalTotal))),
+                        React.createElement('div', { className: 'metric-card' }, React.createElement('div', { className: 'metric-icon' }, '📈'), React.createElement('div', { className: 'metric-content' }, React.createElement('div', { className: 'metric-label' }, 'Embeddings'), React.createElement('div', { className: 'metric-value' }, metrics.embeddingsTotal))),
+                        React.createElement('div', { className: 'metric-card' }, React.createElement('div', { className: 'metric-icon' }, '👥'), React.createElement('div', { className: 'metric-content' }, React.createElement('div', { className: 'metric-label' }, 'Clients'), React.createElement('div', { className: 'metric-value' }, metrics.connectedClients)))
+                    ) : React.createElement('div', { className: 'loading' }, 'Loading metrics...')
+                ),
+
+                // Vector Store Stats
+                React.createElement('section', { className: 'section' },
+                    React.createElement('h2', { className: 'section-title' }, '🗄️ Vector Store (Chroma/Mock)'),
+                    serverStats ? React.createElement('div', { className: 'stats-grid' },
+                        React.createElement('div', { className: 'stat-box' }, React.createElement('div', { className: 'stat-label' }, 'Total Documents'), React.createElement('div', { className: 'stat-value' }, serverStats.totalDocuments ?? 0)),
+                        React.createElement('div', { className: 'stat-box' }, React.createElement('div', { className: 'stat-label' }, 'Embeddings'), React.createElement('div', { className: 'stat-value' }, serverStats.totalEmbeddings ?? '—')),
+                        React.createElement('div', { className: 'stat-box' }, React.createElement('div', { className: 'stat-label' }, 'Queries'), React.createElement('div', { className: 'stat-value' }, serverStats.queryCount ?? 0)),
+                        React.createElement('div', { className: 'stat-box' }, React.createElement('div', { className: 'stat-label' }, 'Status'), React.createElement('div', { className: 'stat-value' }, serverStats.status || 'ready'))
+                    ) : React.createElement('div', { className: 'loading' }, 'Loading stats...')
+                ),
+
+                // Last Answer Preview
+                lastAnswer && React.createElement('section', { className: 'section' },
+                    React.createElement('h2', { className: 'section-title' }, '💬 Last RAG Answer'),
+                    React.createElement('div', { className: 'answer-box' },
+                        React.createElement('div', { className: 'answer-title' }, `Q: ${lastAnswer.query} (session: ${lastAnswer.sessionId || 'anon'})`),
+                        React.createElement('div', { className: 'answer-content' }, lastAnswer.answer),
+                        React.createElement('div', { className: 'sources' }, `📄 Sources: ${lastAnswer.sources?.map(s => s.id).join(', ') || 'none'}`)
+                    )
+                ),
+
+                // Event Timeline
+                React.createElement('section', { className: 'section' },
+                    React.createElement('div', { className: 'event-header' },
+                        React.createElement('h2', { className: 'section-title' }, '📡 Real‑time Events'),
+                        React.createElement('div', { className: 'button-group' },
+                            React.createElement('button', { className: 'btn secondary', onClick: () => sendWS({ type: 'request:event-log' }) }, 'Refresh Log')
+                        )
+                    ),
+                    React.createElement('div', { className: 'event-container' },
+                        events.length === 0 ? React.createElement('div', { className: 'empty-state' }, '👀 Waiting for events...') :
+                            events.slice().reverse().map((event, idx) => {
+                                const time = new Date(event.timestamp).toLocaleTimeString();
+                                const shortType = event.type.split(':').pop();
+                                const color = getEventColor(event.type);
+                                return React.createElement('div', {
+                                    key: idx,
+                                    className: `event-item ${selectedEvent === idx ? 'selected' : ''}`,
+                                    style: { borderLeftColor: color },
+                                    onClick: () => setSelectedEvent(selectedEvent === idx ? null : idx)
+                                },
+                                    React.createElement('div', { className: 'event-item-content' },
+                                        React.createElement('div', { className: 'event-type' },
+                                            React.createElement('span', { className: 'event-type-badge', style: { backgroundColor: color } }, shortType),
+                                            React.createElement('span', { className: 'event-time' }, time)
+                                        ),
+                                        event.data && Object.keys(event.data).length > 0 &&
+                                            React.createElement('div', { className: 'event-preview' }, JSON.stringify(event.data).slice(0, 100).replace(/[{}\"]/g, '') + '...')
+                                    ),
+                                    React.createElement('div', { className: 'event-index' }, events.length - idx)
+                                );
+                            })
+                    )
+                ),
+
+                selectedEvent !== null && events[selectedEvent] &&
+                React.createElement('section', { className: 'section' },
+                    React.createElement('h2', { className: 'section-title' }, '🔎 Event Details'),
+                    React.createElement('pre', { className: 'event-details-code' }, JSON.stringify(events[selectedEvent], null, 2))
+                )
+            )
+        );
+    };
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(React.createElement(Dashboard));
+</script>
+</body>
+</html>

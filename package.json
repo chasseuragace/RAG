@@ -28,5 +28,8 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/yourusername/rag-system"
+  },
+  "dependencies": {
+    "ws": "^8.20.1"
   }
 }

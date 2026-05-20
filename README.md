@@ -301,5 +301,42 @@ A: Omit the `--real` flag: `node rag-server.js --server`. It uses in‑memory st
 
 ---
 
+## ✅ How to use the dashboard
+
+
+2. **Start your RAG server** (real or mock):
+   ```bash
+   node rag-server.js --server --real   # or --server for mock mode
+   ```
+3. **Open the dashboard** in a browser: `http://localhost:3000/dashboard.html` (or just double‑click the file if served via file:// – but WebSocket will only work if the page is served from the same origin; easiest: open `http://localhost:3000` and navigate to `/dashboard.html` or use a simple static file server).
+
+   > If you double‑click the HTML file, the browser may block WebSocket connections due to mixed content. Serve it via the same port using a tiny static server or simply place it in the same directory and access via `http://localhost:3000/dashboard.html` (the RAG server does **not** serve static files by default; you can use `npx serve .` on port 8080 and point the dashboard to `ws://localhost:3000`).  
+
+   **Simplest fix** – serve the dashboard with the RAG server’s own HTTP server: modify `rag-server.js` to serve static files for `/dashboard.html`. But for quick testing, just open the HTML file and accept the mixed‑content warning? Alternatively, run a separate static server:
+   ```bash
+   npx serve . -p 8080
+   ```
+   Then open `http://localhost:8080/dashboard.html` – the WebSocket will connect to `ws://localhost:3000` (no CORS issues).
+
+4. **Interact**:
+   - **Inject** – clears Chroma, reads `./input/*.md`, chunks, embeds, stores.
+   - **Retrieve** – test retrieval without LLM.
+   - **Ask** – full RAG with conversation history (sessionId stored in `./conversations/`).
+   - **Clear** – only clears vector store (no re‑injection).
+
+All events appear in the timeline in real time, metrics update every 2 seconds, and the last answer is displayed.
+
+---
+
+## 🔧 Customisation
+
+- Change WebSocket/HTTP port – edit `getPort()` inside the script (default `3000`).
+- The dashboard assumes the RAG server runs on the same host as the page (or you can hardcode `localhost`). For production, replace `window.location.hostname` with your server IP.
+
+The dashboard is fully self‑contained, no build step required. It matches the server’s exact WebSocket protocol (`request:inject`, `request:ask`, `request:retrieve`, etc.) and handles all events emitted by your updated server.
+
+
+Refer to [report](report.md) for my evaluation of the system . 
+
 *Updated: 2026-05-20*  
 *Corresponds to `rag-server.js` with WebSocket, chunking, conversation history, and real API integrations.*
