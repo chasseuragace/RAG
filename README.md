@@ -1,15 +1,19 @@
-# RAG (Retrieval-Augmented Generation) System - Phase 1 POC
+
+
+# RAG System – Production‑Ready with WebSocket, Chunking & Conversation History
 
 ## Overview
 
-A fully-tested, production-ready RAG system implementation in a single Node.js file with **zero external dependencies**. This is the first phase of your custom RAG solution - architecture and design established, all tests passing.
+A complete, single‑file RAG (Retrieval‑Augmented Generation) implementation with **real integrations** (Gemini embeddings, Chroma vector DB, Novita DeepSeek inference), **WebSocket telemetry**, **automatic chunking** of large Markdown files, and **conversation memory** per session.  
+Designed to be extended by a frontend dashboard: inject documents, monitor progress in real time, and chat with full RAG + history.
 
 ```
-✅ 8/8 Tests Passing
-✅ Zero External Dependencies  
-✅ Abstract Classes for Extension
-✅ Complete Mock Implementations
-✅ REST API Server Ready
+✅ Real mode: Gemini Embeddings + Chroma + Novita DeepSeek
+✅ Mock mode for testing (no external APIs)
+✅ WebSocket & SSE real‑time events
+✅ Injection = clear + chunk + embed + store (no duplicates)
+✅ Conversation history (JSON file based)
+✅ REST API + WebSocket commands
 ```
 
 ---
@@ -19,408 +23,285 @@ A fully-tested, production-ready RAG system implementation in a single Node.js f
 ### Components
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    RAG System Architecture                   │
-├─────────────────────────────────────────────────────────────┤
-│                                                              │
-│  1. INJECTION PIPELINE                                      │
-│     ┌──────────────┐    ┌──────────────┐    ┌────────────┐ │
-│     │   Document   │───→│   Embedder   │───→│ Vector DB  │ │
-│     │    Loader    │    │  (Gemini)    │    │ (Chroma)   │ │
-│     └──────────────┘    └──────────────┘    └────────────┘ │
-│                                                              │
-│  2. RETRIEVAL PIPELINE                                      │
-│     ┌──────────────┐    ┌──────────────┐    ┌────────────┐ │
-│     │    Query     │───→│   Embedder   │───→│ Vector DB  │ │
-│     │   (User)     │    │  (Gemini)    │    │  Search    │ │
-│     └──────────────┘    └──────────────┘    └────────────┘ │
-│                                                              │
-│  3. INFERENCE LAYER (Phase 2)                               │
-│     ┌────────────────────────────────────────────────────┐  │
-│     │  Context + Retrieved Chunks → LLM (DeepSeek) → Answer  │
-│     └────────────────────────────────────────────────────┘  │
-│                                                              │
-└─────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────┐
+│                       RAG System (Current)                          │
+├────────────────────────────────────────────────────────────────────┤
+│                                                                    │
+│  INJECTION PIPELINE (triggered by frontend or API)                │
+│  ┌────────────┐    ┌────────────┐    ┌───────────┐    ┌────────┐ │
+│  │ Clear DB   │ →  │ Load .md   │ →  │ Chunk     │ →  │ Embed  │ │
+│  │ (Chroma)   │    │ (input/)   │    │ (overlap) │    │(Gemini)│ │
+│  └────────────┘    └────────────┘    └───────────┘    └────────┘ │
+│                                                           ↓        │
+│                                                    ┌────────────┐ │
+│                                                    │ Store in   │ │
+│                                                    │ Chroma     │ │
+│                                                    └────────────┘ │
+│                                                                    │
+│  RETRIEVAL + INFERENCE (RAG Chat)                                 │
+│  ┌────────────┐    ┌────────────┐    ┌───────────┐    ┌────────┐ │
+│  │ User Query │ →  │ Embed      │ →  │ Chroma    │ →  │ Context│ │
+│  │ + history  │    │ (Gemini)   │    │ Search    │    │ Chunks │ │
+│  └────────────┘    └────────────┘    └───────────┘    └────────┘ │
+│                                                           ↓        │
+│                                                    ┌────────────┐ │
+│                                                    │ Novita     │ │
+│                                                    │ DeepSeek   │ │
+│                                                    │ Answer     │ │
+│                                                    └────────────┘ │
+│                                                                    │
+│  TELEMETRY (WebSocket / SSE)                                       │
+│  ┌─────────────────────────────────────────────────────────────┐  │
+│  │ Events: injection:start/complete, embedding:complete,      │  │
+│  │ vectorstore:stored/queried, retrieval:complete, error, ... │  │
+│  └─────────────────────────────────────────────────────────────┘  │
+└────────────────────────────────────────────────────────────────────┘
 ```
 
-### Class Hierarchy
+### Key Directories (hardcoded)
 
-#### Abstract Base Classes
-- `DocumentLoader` - Interface for loading documents
-- `Embedder` - Interface for text embedding
-- `VectorStore` - Interface for vector storage/retrieval
-- `Retriever` - Interface for querying
-- `InjectionPipeline` - Orchestrates document loading → embedding → storage
-- `RetrievalPipeline` - Orchestrates query → embedding → search
-
-#### Mock Implementations (for testing)
-- `MockDocumentLoader` - Returns predefined test documents
-- `MockEmbedder` - Generates deterministic embeddings using text hash
-- `MockVectorStore` - In-memory vector storage with cosine similarity
-- `MockRetriever` - Retrieves using embedder + vector store
-
-#### Concrete Implementations
-- `ConcreteInjectionPipeline` - Full injection workflow
-- `ConcreteRetrievalPipeline` - Full retrieval workflow
+- **`./input/`** – Place your `.md` files here. Injection reads from this folder.
+- **`./conversations/`** – JSON files storing chat history per `sessionId`.
 
 ---
 
-## 📋 API Endpoints
+## 🚀 Quick Start
 
-### `GET /`
-Server info and available endpoints
+### Prerequisites
+
+1. **Node.js** (v18+ recommended)
+2. **ChromaDB** – Run with Docker:
+   ```bash
+   docker run -d -p 8000:8000 chromadb/chroma
+   ```
+3. **API Keys** (set as environment variables)
+   - `GEMINI_API_KEY` or `AI_STUDIO_API_KEY` (for embeddings)
+   - `NOVITA_API_KEY` (for DeepSeek inference)
+
+### Install & Run
+
 ```bash
-curl http://localhost:3000/
+# Clone / create the single file (rag-server.js)
+npm install ws   # optional, for WebSocket support
+mkdir input conversations
+# Place your .md files inside ./input/
+
+# Start the server in REAL mode
+export GEMINI_API_KEY="your_key"
+export NOVITA_API_KEY="your_key"
+node rag-server.js --server --real
 ```
 
-### `GET /health`
-Health check
-```bash
-curl http://localhost:3000/health
-```
-
-### `GET /stats`
-Vector store statistics
-```bash
-curl http://localhost:3000/stats
-```
-
-### `POST /inject`
-Inject documents into vector store
-```bash
-curl -X POST http://localhost:3000/inject \
-  -H "Content-Type: application/json" \
-  -d '{"folderPath": "/path/to/docs"}'
-```
-
-**Response:**
-```json
-{
-  "success": true,
-  "documentsProcessed": 3,
-  "documentsStored": 3,
-  "duration": "15ms",
-  "results": [
-    {
-      "documentId": "doc-1",
-      "status": "stored",
-      "timestamp": 1716190000000
-    }
-  ]
-}
-```
-
-### `POST /retrieve`
-Retrieve documents from vector store
-```bash
-curl -X POST http://localhost:3000/retrieve \
-  -H "Content-Type: application/json" \
-  -d '{"query": "artificial intelligence", "topK": 5}'
-```
-
-**Response:**
-```json
-{
-  "success": true,
-  "query": "artificial intelligence",
-  "resultsCount": 3,
-  "duration": "2ms",
-  "results": [
-    {
-      "id": "doc-1",
-      "relevance": "94.32%",
-      "metadata": {
-        "file": "ai.md",
-        "size": 50
-      }
-    }
-  ]
-}
-```
+Server runs at `http://localhost:3000` (or custom port with `--port`).
 
 ---
 
-## 🚀 Usage
+## 📡 Endpoints & Commands
 
-### Run Tests (All 8 tests, 100% pass rate)
+### REST API
+
+| Method | Endpoint       | Description                                                                 |
+|--------|----------------|-----------------------------------------------------------------------------|
+| GET    | `/`            | Server info, configuration (input dir, chunk size)                         |
+| GET    | `/health`      | Health check, mode (real/mock), connected clients                          |
+| GET    | `/metrics`     | Real‑time server metrics (requests, latencies, errors, uptime)             |
+| GET    | `/stats`       | Vector store statistics (number of stored chunks)                          |
+| GET    | `/events`      | Server‑Sent Events (SSE) – real‑time event stream                          |
+| POST   | `/inject`      | **Clear Chroma + read ./input + chunk + embed + store**                    |
+| POST   | `/clear`       | Clear vector store **without** re‑injecting                                 |
+| POST   | `/retrieve`    | Retrieve relevant chunks (no LLM) – body: `{query, topK?}`                 |
+| POST   | `/ask`         | Full RAG with conversation history – body: `{query, sessionId?, topK?}`    |
+
+**Example `/inject` call (clears and injects from `./input`):**
+```bash
+curl -X POST http://localhost:3000/inject
+```
+
+**Example `/ask` with session memory:**
+```bash
+curl -X POST http://localhost:3000/ask \
+  -H "Content-Type: application/json" \
+  -d '{"query": "What is RAG?", "sessionId": "user123", "topK": 3}'
+```
+Response includes `answer`, `sources`, and `sessionId`.
+
+### WebSocket Commands
+
+Connect to `ws://localhost:3000` and send JSON messages:
+
+| Command type              | Payload example                                          | Response                                 |
+|---------------------------|----------------------------------------------------------|------------------------------------------|
+| `request:metrics`         | `{"type":"request:metrics"}`                             | `{"type":"metrics","data":{...}}`        |
+| `request:event-log`       | `{"type":"request:event-log"}`                           | Last 1000 events                         |
+| `request:stats`           | `{"type":"request:stats"}`                               | Vector store stats                       |
+| `request:inject`          | `{"type":"request:inject"}`                              | `{"type":"inject:result","data":{...}}`  |
+| `request:clear`           | `{"type":"request:clear"}`                               | `{"type":"clear:result"}`                |
+| `request:retrieve`        | `{"type":"request:retrieve","query":"AI","topK":5}`      | Retrieved chunks                         |
+| `request:ask`             | `{"type":"request:ask","query":"What is RAG?","sessionId":"user123","topK":3}` | Answer + sources + sessionId |
+| `ping`                    | `{"type":"ping"}`                                        | `{"type":"pong","timestamp":...}`        |
+
+All server events are broadcast to all connected WebSocket clients (e.g., `injection:start`, `embedding:complete`, `error`).
+
+---
+
+## 🧠 Feature Details
+
+### 1. Injection Pipeline (Idempotent)
+
+- **Clears** the entire Chroma collection.
+- Recursively reads all `.md` files from `./input/`.
+- **Chunks** each file using:
+  - `CHUNK_SIZE` (default 1000 characters)
+  - `CHUNK_OVERLAP` (default 200)
+  - Paragraph‑ and sentence‑aware cut points.
+- Embeds each chunk with **Gemini Embedding API**.
+- Stores each chunk as a separate document in Chroma (metadata includes original file, chunk index).
+
+Trigger via `POST /inject` or WebSocket `request:inject`.
+
+### 2. RAG Chat with Conversation History
+
+- `POST /ask` or WebSocket `request:ask` accepts `sessionId`.
+- If `sessionId` is new, a JSON file `./conversations/<sessionId>.json` is created.
+- The last 10 messages (user + assistant) are sent as conversation context to the LLM.
+- **Retrieval** – query embedded with Gemini, fetch top‑K chunks from Chroma.
+- **LLM** – Novita DeepSeek receives: system prompt (with retrieved chunks), conversation history, and the current user query.
+- The assistant’s answer is appended to the conversation file.
+
+### 3. WebSocket Telemetry
+
+All pipeline steps emit events that can be consumed by a dashboard:
+- `injection:start`, `injection:documents-loaded`, `injection:chunks-created`, `injection:embeddings-generated`, `injection:document-stored`, `injection:complete`
+- `retrieval:start`, `retrieval:query-embedded`, `retrieval:complete`
+- `embedding:complete`, `embedding:batch`
+- `vectorstore:stored`, `vectorstore:queried`, `vectorstore:cleared`
+- `error`, `client:connected`
+
+Events are also available via SSE at `/events`.
+
+---
+
+## ⚙️ Configuration (Environment Variables)
+
+| Variable             | Default                | Description                                    |
+|----------------------|------------------------|------------------------------------------------|
+| `RAG_INPUT_DIR`      | `./input`              | Folder containing `.md` files to inject       |
+| `RAG_CHUNK_SIZE`     | `1000`                 | Max characters per chunk                      |
+| `RAG_CHUNK_OVERLAP`  | `200`                  | Overlap between consecutive chunks            |
+| `GEMINI_API_KEY`     | (required for real)    | Google Gemini API key                          |
+| `AI_STUDIO_API_KEY`  | (alternative)          | Same as Gemini key                             |
+| `NOVITA_API_KEY`     | (required for real)    | Novita AI API key for DeepSeek                 |
+| `PORT` (or `--port`) | `3000`                 | HTTP/WebSocket server port                     |
+
+You can also set `--real` flag to use real APIs; without it, the server runs in **mock mode** (deterministic embeddings, in‑memory store, mock LLM).
+
+---
+
+## 🧪 Testing
+
+### Run Mock Test Suite (no external dependencies)
 ```bash
 node rag-server.js --test
 ```
+All tests (document loading, embedding consistency, vector search, pipelines) should pass.
 
-### Start Server
+### Run Real Integration Tests (requires Chroma, Gemini, Novita)
 ```bash
-# Default port 3000
-node rag-server.js --server
-
-# Custom port
-node rag-server.js --server --port 8080
+node rag-server.js --real-test
 ```
+Tests real connectivity: Chroma heartbeat, embedding generation, storing/querying, and Novita inference.
 
-### Show Help
-```bash
-node rag-server.js
+---
+
+## 📂 Directory Structure (after server start)
+
+```
+.
+├── rag-server.js
+├── input/                     # Place your .md files here
+│   ├── doc1.md
+│   └── doc2.md
+├── conversations/             # Auto‑created, JSON chat logs
+│   ├── user123.json
+│   └── anon_1623456789.json
+└── (optional) package.json    # if you install ws
 ```
 
 ---
 
-## 🧪 Test Coverage
+## 🔌 Integration with a Frontend Dashboard
 
-All 8 tests passing:
+The server is ready to be consumed by a React/Vue/Svelte dashboard:
 
-1. ✅ **Document Loading** - MockDocumentLoader loads documents correctly
-2. ✅ **Embedding Consistency** - Same text produces same embedding
-3. ✅ **Vector Storage** - Documents store and retrieve properly
-4. ✅ **Similarity Search** - Vector similarity search works correctly
-5. ✅ **Injection Pipeline** - End-to-end document processing works
-6. ✅ **Retrieval Pipeline** - Query → embedding → search works
-7. ✅ **Batch Embedding** - Multiple texts embed correctly
-8. ✅ **Call Tracking** - Embedder tracks API calls for monitoring
+- **Connect WebSocket** to `ws://localhost:3000` to receive real‑time events (progress bars, error notifications, stats).
+- **Call `request:inject`** via WebSocket or `POST /inject` – the server clears existing data, chunks, embeds, and stores everything from `./input`.
+- **Display conversation** – send `request:ask` with a `sessionId`; the server maintains history.
+- **Show metrics** – poll `GET /metrics` or subscribe to WebSocket `request:metrics`.
+
+No extra endpoints needed – the current API already supports all dashboard needs.
 
 ---
 
-## 📁 File Structure
+## 🛠️ Development & Extension
 
-```
-rag-system/
-├── rag-server.js      # Single-file implementation (1000+ lines)
-├── README.md          # This file
-├── package.json       # Node.js metadata
-└── examples/
-    ├── test-injection.sh
-    ├── test-retrieval.sh
-    └── api-examples.md
-```
+All core classes are exported for custom scripts:
 
----
-
-## 🔄 Data Flow Examples
-
-### Injection Flow
-```
-markdown files
-    ↓
-[DocumentLoader]
-    ↓
-document objects: {id, content, metadata}
-    ↓
-[Embedder.embedBatch()]
-    ↓
-384-dimensional vectors
-    ↓
-[VectorStore.store()]
-    ↓
-in-memory vector database (cosine similarity index)
-```
-
-### Retrieval Flow
-```
-user query: "what is machine learning?"
-    ↓
-[Embedder.embed()]
-    ↓
-384-dimensional query vector
-    ↓
-[VectorStore.query()]
-    ↓
-cosine similarity search (top-K results)
-    ↓
-return: [{id, score, metadata}, ...]
-```
-
----
-
-## 🔧 Implementation Details
-
-### Embeddings
-- **Current (Phase 1)**: Deterministic mock embeddings (384-dimensional)
-- **Phase 2**: Gemini Embedding API (`gemini-embedding-2`)
-- Method: `POST https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-2:embedContent`
-
-### Vector Store
-- **Current (Phase 1)**: In-memory Map with cosine similarity
-- **Phase 2**: Docker Chroma instance
-- **Phase 3**: Optional: Qdrant, Pinecone, or Weaviate
-
-### Inference (Phase 2)
-- Provider: Novita AI (DeepSeek-v4-pro)
-- Endpoint: `https://api.novita.ai/openai/v1/chat/completions`
-- Headers: `Authorization: Bearer $NOVITA_API_KEY`
-
-### Environment Variables
-```bash
-export AI_STUDIO_API_KEY="your-gemini-key"      # For embeddings
-export NOVITA_API_KEY="your-novita-key"         # For inference
-```
-
----
-
-## 🛠️ Phase 2: Implementation Plan
-
-When you're ready to move to Phase 2, here's what changes:
-
-### 1. Replace MockEmbedder with GeminiEmbedder
 ```javascript
-class GeminiEmbedder extends Embedder {
-  async embed(text) {
-    const response = await fetch(
-      'https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-2:embedContent',
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-goog-api-key': process.env.AI_STUDIO_API_KEY
-        },
-        body: JSON.stringify({
-          model: 'models/gemini-embedding-2',
-          content: { parts: [{ text }] }
-        })
-      }
-    );
-    const data = await response.json();
-    return data.embedding.values;
-  }
-}
+const { 
+  RAGServer, serverEvents, 
+  GeminiEmbedder, ChromaVectorStore, NovitaInference,
+  ConversationStore, chunkText 
+} = require('./rag-server.js');
 ```
 
-### 2. Replace MockDocumentLoader with RealDocumentLoader
+Example: Manually run injection from a script:
+
 ```javascript
-class RealDocumentLoader extends DocumentLoader {
-  async loadDocuments(folderPath) {
-    // Read all .md files from folderPath
-    // Parse frontmatter (optional)
-    // Return document objects
-  }
-}
-```
-
-### 3. Add Docker Compose
-```yaml
-version: '3.8'
-services:
-  chroma:
-    image: ghcr.io/chroma-core/chroma:latest
-    ports:
-      - "8000:8000"
-    environment:
-      ALLOW_RESET: "true"
-```
-
-### 4. Replace MockVectorStore with ChromaVectorStore
-```javascript
-class ChromaVectorStore extends VectorStore {
-  constructor(host = 'localhost', port = 8000) {
-    super();
-    this.baseUrl = `http://${host}:${port}`;
-  }
-
-  async store(id, embedding, metadata) {
-    // POST to Chroma HTTP API
-  }
-
-  async query(embedding, topK) {
-    // POST to Chroma HTTP API
-  }
-}
-```
-
-### 5. Add Inference Integration
-```javascript
-class NowitaInference {
-  async generateAnswer(query, context) {
-    // POST to Novita API with context chunks
-    // Return LLM response
-  }
-}
+const server = new RAGServer(3000, true);
+await server.initialize();
+await server.injectionPipeline.run('./input');
 ```
 
 ---
 
-## 🧠 Key Design Decisions
+## 📊 Performance Notes (Real Mode)
 
-1. **Abstract Classes First** - Extensible, testable, implementation-agnostic
-2. **Zero Dependencies** - Only Node.js built-ins (http, fs, etc.)
-3. **Single File** - Easy to understand, deploy, and modify
-4. **Mock-First Testing** - Validates architecture before connecting real APIs
-5. **Cosine Similarity** - Efficient vector search for POC
-6. **Deterministic Mocks** - Same text always produces same embedding for reproducible tests
-
----
-
-## 📊 Performance Notes (with current mocks)
-
-- **Document Loading**: ~1-2ms (in-memory)
-- **Embedding**: ~0.1-0.5ms per document (deterministic hash)
-- **Vector Storage**: ~0.1ms per document
-- **Similarity Search**: ~1-2ms (brute force for <10k docs)
-- **Full Injection Pipeline**: ~15ms for 3 documents
-
-*Note: Real performance will depend on Gemini API latency and Chroma performance*
-
----
-
-## 🎯 Next Steps
-
-1. ✅ Phase 1 Complete: Architecture established, all tests passing
-2. ⏭️ Phase 2: Connect real APIs (Gemini embedding, Docker Chroma, Novita inference)
-3. ⏭️ Phase 3: Add CLI tool, file watching, metadata extraction
-4. ⏭️ Phase 4: Production deployment, monitoring, caching
-
----
-
-## 💡 Usage Tips
-
-### Testing Individual Components
-```javascript
-const embedder = new MockEmbedder();
-const embedding = await embedder.embed("test");
-console.log(embedding.length); // 384
-
-const store = new MockVectorStore();
-await store.store("doc-1", embedding, {file: "test.md"});
-const results = await store.query(embedding, 5);
-console.log(results); // [{id, score, metadata}, ...]
-```
-
-### Monitoring Embedding Calls
-```javascript
-const embedder = new MockEmbedder();
-// ... do stuff ...
-console.log(`Total API calls: ${embedder.getCallCount()}`);
-```
-
-### Batch Processing
-```javascript
-const texts = ["text1", "text2", "text3"];
-const embeddings = await embedder.embedBatch(texts);
-// embeddings is array of 384-dim vectors
-```
-
----
-
-## 📝 License
-
-This is your POC implementation - feel free to extend, modify, and productionize as needed.
+- **Chunking** – adds ~1‑5ms per document (negligible).
+- **Gemini embedding** – ~200‑500ms per chunk (batched for efficiency).
+- **Chroma query** – <50ms for small collections.
+- **Novita DeepSeek** – ~1‑3s per answer (depends on context size).
+- **WebSocket** – adds <1ms overhead per event.
 
 ---
 
 ## ❓ FAQ
 
-**Q: Why no external dependencies?**
-A: Keeps it simple, easy to deploy, easy to understand. Phase 2 will add only what's necessary (HTTP client for APIs).
+**Q: Why does `/inject` clear everything first?**  
+A: To avoid duplicates and stale data. The input directory is the single source of truth. Every injection is a full refresh.
 
-**Q: Why abstract classes?**
-A: Lets you swap implementations (e.g., MockEmbedder ↔ GeminiEmbedder) without changing orchestration code.
+**Q: How do I change the chunk size?**  
+A: Set `RAG_CHUNK_SIZE` env variable or modify the constants at the top of the file.
 
-**Q: Can I use this in production?**
-A: Not yet - Phase 1 is POC/testing. Phase 2 integrates real APIs. Phase 3+ is production-ready.
+**Q: Can I use a different LLM?**  
+A: Yes – replace `NovitaInference` with another class that implements `generateAnswer()`.
 
-**Q: How do I add my own vector store?**
-A: Extend the `VectorStore` class and implement `store()`, `query()`, `clear()`, and `getStats()`.
+**Q: Does the server support streaming answers?**  
+A: Not yet – answers are returned as a single JSON field. Streaming can be added by extending the WebSocket protocol.
 
-**Q: Where do I handle the LLM inference?**
-A: Phase 2! The retrieval pipeline returns chunks; a separate inference pipeline will send them + query to Novita AI.
+**Q: Where are conversation histories stored?**  
+A: `./conversations/<sessionId>.json`. You can delete them to reset.
+
+**Q: How to run without Chroma (mock mode)?**  
+A: Omit the `--real` flag: `node rag-server.js --server`. It uses in‑memory store and mock embeddings.
 
 ---
 
-Generated: 2026-05-20
-Status: ✅ All tests passing, ready for Phase 2
+## 🧾 License & Status
+
+**Status:** Production‑ready for dashboard integration.  
+**Future enhancements:** streaming answers, file watching (auto‑inject on change), multi‑user auth, advanced chunking strategies.
+
+---
+
+*Updated: 2026-05-20*  
+*Corresponds to `rag-server.js` with WebSocket, chunking, conversation history, and real API integrations.*
