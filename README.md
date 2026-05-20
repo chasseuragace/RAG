@@ -336,7 +336,7 @@ All events appear in the timeline in real time, metrics update every 2 seconds, 
 The dashboard is fully self‑contained, no build step required. It matches the server’s exact WebSocket protocol (`request:inject`, `request:ask`, `request:retrieve`, etc.) and handles all events emitted by your updated server.
 
 
-Refer to [report](report.md) for my evaluation of the system . 
+Refer to [System Evaluation Report](Report.md)
 
 *Updated: 2026-05-20*  
 *Corresponds to `rag-server.js` with WebSocket, chunking, conversation history, and real API integrations.*
