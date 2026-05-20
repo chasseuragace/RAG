@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  chroma:
+    image: ghcr.io/chroma-core/chroma:latest
+    container_name: chroma-db
+    ports:
+      - "8000:8000"
+    environment:
+      - ALLOW_RESET=true
+    volumes:
+      - chroma-data:/chroma/data
+
+volumes:
+  chroma-data:
