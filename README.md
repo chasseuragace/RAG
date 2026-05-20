@@ -1,5 +1,3 @@
-
-
 # RAG System – Production‑Ready with WebSocket, Chunking & Conversation History
 
 ## Overview
