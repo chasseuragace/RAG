@@ -66,6 +66,18 @@ async function runDeltaTests() {
   assert(store.docs.size === 0, 'store is empty after removal');
   assert(registry.get('doc1.md') === undefined, 'registry entry deleted');
 
+  console.log('\n[delta] Round 5: full run() rebuilds the registry to match');
+  currentDocs = [{ id: 'a.md', content: 'alpha content' }, { id: 'b.md', content: 'beta content' }];
+  await pipeline.run('/x', registry);
+  assert(countChunks('a.md') === 1 && countChunks('b.md') === 1, 'full run embedded both docs');
+  assert(!!registry.get('a.md') && !!registry.get('b.md'), 'registry populated by full run');
+
+  console.log('\n[delta] Round 6: incremental right after full run re-embeds nothing');
+  const callsBeforeInc = embedder.getCallCount();
+  const r6 = await pipeline.runIncremental('/x', registry);
+  assert(r6.added === 0 && r6.changed === 0 && r6.unchanged === 2, 'all docs classified unchanged');
+  assert(embedder.getCallCount() === callsBeforeInc, 'zero embeddings after a full run (no double work)');
+
   fs.unlinkSync(tmpRegistry);
   console.log('\n✅ All delta tests passed\n');
 }

@@ -28,6 +28,9 @@ class DocRegistry {
   get(docId) { return this.docs[docId]; }
   set(docId, record) { this.docs[docId] = record; this._save(); }
   remove(docId) { delete this.docs[docId]; this._save(); }
+  // Replace the entire registry with `records` (docId -> record). Used after a
+  // full rebuild so the registry reflects exactly what is now in the store.
+  replaceAll(records) { this.docs = { ...records }; this._save(); }
   allIds() { return Object.keys(this.docs); }
   /**
    * Classify loaded documents against the registry by content hash.

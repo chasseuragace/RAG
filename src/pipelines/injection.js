@@ -1,12 +1,16 @@
 const { InjectionPipeline } = require('../core/interfaces');
 const { chunkText } = require('../core/chunker');
+const { hashContent } = require('../core/registry');
 const { CHUNK_SIZE, CHUNK_OVERLAP } = require('../config');
 const { serverEvents } = require('../events');
 
 class ConcreteInjectionPipeline extends InjectionPipeline {
   // Full rebuild: clear the store, then chunk/embed/store every document.
   // Kept as an escape hatch; prefer runIncremental() for routine syncs.
-  async run(folderPath) {
+  // When a `registry` is passed it is rebuilt to mirror exactly what was just
+  // embedded, so a subsequent incremental run sees everything as unchanged
+  // (instead of re-embedding the whole corpus a second time).
+  async run(folderPath, registry = null) {
     const start = Date.now();
     serverEvents.logEvent('injection:start', { folderPath });
     try {
@@ -19,8 +23,9 @@ class ConcreteInjectionPipeline extends InjectionPipeline {
       if (!docs.length) throw new Error('No documents found');
       serverEvents.logEvent('injection:documents-loaded', { count: docs.length });
 
-      // 3. Chunk each document
+      // 3. Chunk each document (tracking per-doc info for the registry)
       const chunks = [];
+      const registryRecords = {};
       for (const doc of docs) {
         const textChunks = chunkText(doc.content, CHUNK_SIZE, CHUNK_OVERLAP);
         for (let i = 0; i < textChunks.length; i++) {
@@ -35,6 +40,13 @@ class ConcreteInjectionPipeline extends InjectionPipeline {
             }
           });
         }
+        registryRecords[doc.id] = {
+          hash: hashContent(doc.content),
+          size: doc.metadata.size,
+          mtime: doc.metadata.mtime,
+          chunkCount: textChunks.length,
+          lastIndexedAt: Date.now()
+        };
       }
       serverEvents.logEvent('injection:chunks-created', { totalChunks: chunks.length });
 
@@ -48,6 +60,9 @@ class ConcreteInjectionPipeline extends InjectionPipeline {
         await this.store.store(chunks[i].id, embeddings[i], { ...chunks[i].metadata, content: chunks[i].content });
         serverEvents.logEvent('injection:document-stored', { id: chunks[i].id, progress: `${i+1}/${chunks.length}` });
       }
+
+      // 6. Rebuild the registry to match the freshly-embedded corpus.
+      if (registry) registry.replaceAll(registryRecords);
 
       const duration = Date.now() - start;
       serverEvents.logEvent('injection:complete', { documentsProcessed: docs.length, chunksStored: chunks.length, duration });

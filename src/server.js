@@ -63,8 +63,8 @@ class RAGServer {
       const loader = new MockDocumentLoader();
       this.injectionPipeline = new ConcreteInjectionPipeline(loader, embedder, store);
       this.retrievalPipeline = new ConcreteRetrievalPipeline(embedder, store);
-      // Pre‑inject mock documents
-      await this.injectionPipeline.run('/mock');
+      // Pre‑inject mock documents (registry populated to match)
+      await this.injectionPipeline.run('/mock', this.registry);
       this.store = store;
     }
   }
@@ -104,10 +104,10 @@ class RAGServer {
         ws.send(JSON.stringify({ type: 'stats', data: stats }));
         break;
       case 'request:inject':
-        // Full rebuild: clear + inject from INPUT_DIR. Registry is reset so it
-        // never points at chunks the clear just removed.
-        const injectResult = await this.injectionPipeline.run(INPUT_DIR);
-        this._resetRegistry();
+        // Full rebuild: clear + inject from INPUT_DIR. The pipeline rebuilds the
+        // registry to mirror what it embedded, so the next incremental run skips
+        // unchanged files instead of re-embedding the whole corpus.
+        const injectResult = await this.injectionPipeline.run(INPUT_DIR, this.registry);
         ws.send(JSON.stringify({ type: 'inject:result', data: injectResult }));
         break;
       case 'request:inject-incremental':
@@ -205,9 +205,9 @@ class RAGServer {
       req.on('close', () => { serverEvents.removeListener('event', listener); serverEvents.incrementConnectedClients(-1); res.end(); });
     }
     else if (url === '/inject' && req.method === 'POST') {
-      // Full rebuild: clear + inject from INPUT_DIR (reset registry to match).
-      this.injectionPipeline.run(INPUT_DIR).then(result => {
-        this._resetRegistry();
+      // Full rebuild: clear + inject from INPUT_DIR. The pipeline rebuilds the
+      // registry to match, so a later incremental sync won't re-embed everything.
+      this.injectionPipeline.run(INPUT_DIR, this.registry).then(result => {
         res.writeHead(200);
         res.end(JSON.stringify(result, null, 2));
       }).catch(err => {
