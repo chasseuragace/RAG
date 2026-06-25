@@ -154,8 +154,15 @@
                     break;
                 case 'inject:result':
                     console.log('Injection result:', msg.data);
-                    if (msg.data.success) alert(`✅ Injection complete: ${msg.data.chunksStored || msg.data.documentsProcessed} chunks stored.`);
-                    else alert(`❌ Injection failed: ${msg.data.error}`);
+                    if (!msg.data.success) { alert(`❌ Injection failed: ${msg.data.error}`); break; }
+                    if (msg.data.mode === 'incremental') {
+                        const d = msg.data;
+                        alert(`✅ Incremental sync complete (${d.duration})\n` +
+                              `added: ${d.added}  changed: ${d.changed}  unchanged: ${d.unchanged}  removed: ${d.removed}\n` +
+                              `chunks (re)stored: ${d.chunksStored}`);
+                    } else {
+                        alert(`✅ Full rebuild complete: ${msg.data.chunksStored || msg.data.documentsProcessed} chunks stored.`);
+                    }
                     break;
                 case 'retrieve:result':
                     console.log('Retrieve result:', msg.data);
@@ -192,9 +199,14 @@
         };
 
         const handleInject = () => {
-            if (confirm('⚠️ This will CLEAR the entire vector store and re‑inject all .md files from ./input/ directory. Continue?')) {
+            if (confirm('⚠️ FULL REBUILD: this CLEARS the entire vector store and re‑embeds every .md file in ./input/. Use Incremental Sync for routine updates. Continue?')) {
                 sendWS({ type: 'request:inject' });
             }
+        };
+        const handleIncremental = () => {
+            // Differential sync: re‑embeds only added/changed files, drops removed
+            // ones. No clear, so retrieval stays available. Safe to run routinely.
+            sendWS({ type: 'request:inject-incremental' });
         };
         const handleClear = () => {
             if (confirm('Clear vector store without re‑injecting?')) sendWS({ type: 'request:clear' });
@@ -238,7 +250,8 @@
                 // Action Buttons
                 React.createElement('section', { className: 'section' },
                     React.createElement('div', { className: 'button-group' },
-                        React.createElement('button', { className: 'btn', onClick: handleInject }, '📥 Inject (clear + load ./input)'),
+                        React.createElement('button', { className: 'btn', onClick: handleIncremental, title: 'Re‑embed only changed files (hash‑diff). No clear; retrieval stays live.' }, '🔄 Incremental Sync (delta only)'),
+                        React.createElement('button', { className: 'btn secondary', onClick: handleInject, title: 'Clear everything and re‑embed the whole ./input corpus.' }, '📥 Full Rebuild (clear + load ./input)'),
                         React.createElement('button', { className: 'btn', onClick: handleRetrieve }, '🔍 Retrieve'),
                         React.createElement('button', { className: 'btn', onClick: handleAsk }, '💬 Ask (RAG + history)'),
                         React.createElement('button', { className: 'btn danger', onClick: handleClear }, '🗑️ Clear store')
