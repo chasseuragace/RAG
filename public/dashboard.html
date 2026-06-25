@@ -3,61 +3,114 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>RAG Dashboard – Real‑time Telemetry & Chat</title>
+    <title>RAG Server — Console</title>
     <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
     <style>
+        :root {
+            --bg: #f4f5f7;
+            --surface: #ffffff;
+            --text: #111827;
+            --muted: #6b7280;
+            --faint: #9ca3af;
+            --border: #e5e7eb;
+            --border-strong: #d1d5db;
+            --accent: #4f46e5;
+            --accent-hover: #4338ca;
+            --success: #047857;
+            --success-bg: #ecfdf5;
+            --danger: #b91c1c;
+            --danger-bg: #fef2f2;
+            --warn: #b45309;
+            --info: #1d4ed8;
+            --info-bg: #eff6ff;
+            --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        }
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f9fafb; color: #1f2937; }
-        .dashboard-container { min-height: 100vh; background: #f9fafb; }
-        .dashboard-header { background: #1f2937; color: white; padding: 24px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); position: sticky; top: 0; z-index: 100; }
-        .header-content { max-width: 1400px; margin: 0 auto; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 16px; }
-        .header-title { font-size: 28px; font-weight: 700; }
-        .status-badges { display: flex; gap: 12px; }
-        .badge { padding: 6px 12px; border-radius: 6px; font-size: 13px; font-weight: 500; color: white; }
-        .badge.connected { background: #10b981; }
-        .badge.disconnected { background: #ef4444; }
-        .badge.warning { background: #f59e0b; }
-        .main-content { max-width: 1400px; margin: 0 auto; padding: 24px; }
-        .section { background: white; border-radius: 8px; padding: 24px; margin-bottom: 24px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
-        .section-title { margin: 0 0 16px 0; font-size: 20px; font-weight: 600; }
-        .event-header { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 16px; }
-        .button-group { display: flex; gap: 8px; flex-wrap: wrap; }
-        .btn { padding: 8px 16px; background: #3b82f6; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 14px; font-weight: 500; transition: background 0.2s; }
-        .btn:hover { background: #2563eb; }
-        .btn.danger { background: #ef4444; }
-        .btn.danger:hover { background: #dc2626; }
-        .btn.secondary { background: #6b7280; }
-        .btn.secondary:hover { background: #4b5563; }
-        .metrics-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; }
-        .metric-card { display: flex; align-items: center; gap: 12px; padding: 16px; background: #f3f4f6; border-radius: 6px; border: 1px solid #e5e7eb; cursor: pointer; transition: transform 0.2s; }
-        .metric-card:hover { transform: translateY(-2px); }
-        .metric-icon { font-size: 24px; }
-        .metric-content { flex: 1; }
-        .metric-label { font-size: 12px; color: #6b7280; font-weight: 500; margin-bottom: 4px; }
-        .metric-value { font-size: 20px; font-weight: 700; }
-        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; }
-        .stat-box { padding: 16px; background: #f9fafb; border-left: 4px solid #3b82f6; border-radius: 4px; border: 1px solid #e5e7eb; }
-        .stat-label { font-size: 12px; color: #6b7280; margin-bottom: 4px; }
-        .stat-value { font-size: 24px; font-weight: 700; }
-        .event-container { max-height: 600px; overflow-y: auto; display: flex; flex-direction: column-reverse; gap: 8px; }
-        .event-item { display: flex; justify-content: space-between; align-items: center; padding: 12px; border-radius: 6px; border-left: 4px solid #3b82f6; cursor: pointer; background: white; border: 1px solid #e5e7eb; margin-bottom: 4px; }
-        .event-item:hover { background: #f3f4f6; }
-        .event-item.selected { background: #f3f4f6; }
-        .event-item-content { flex: 1; }
-        .event-type { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
-        .event-type-badge { display: inline-block; padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; color: white; }
-        .event-time { font-size: 11px; color: #9ca3af; }
-        .event-preview { font-size: 12px; color: #6b7280; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-        .event-index { font-size: 12px; color: #d1d5db; font-weight: 600; min-width: 30px; text-align: right; }
-        .event-details-code { background: #1f2937; color: #10b981; padding: 16px; border-radius: 6px; font-size: 12px; font-family: monospace; overflow-x: auto; margin: 0; max-height: 400px; }
-        .answer-box { background: #f0fdf4; border-left: 4px solid #10b981; padding: 16px; border-radius: 6px; margin-top: 16px; }
-        .answer-title { font-weight: 600; margin-bottom: 8px; color: #047857; }
-        .answer-content { white-space: pre-wrap; font-size: 14px; }
-        .sources { margin-top: 12px; font-size: 12px; color: #6b7280; }
-        .empty-state { text-align: center; padding: 40px 20px; color: #9ca3af; }
-        .loading { text-align: center; padding: 20px; color: #6b7280; }
-        @media (max-width: 640px) { .header-content { flex-direction: column; align-items: flex-start; } .button-group { width: 100%; justify-content: space-between; } }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: var(--bg); color: var(--text); font-size: 13px; line-height: 1.5;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        /* Header */
+        .app-header { background: var(--surface); border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 50; }
+        .app-header__inner { max-width: 1280px; margin: 0 auto; padding: 12px 24px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+        .app-title { font-size: 14px; font-weight: 600; letter-spacing: -0.01em; }
+        .app-title span { color: var(--muted); font-weight: 400; margin-left: 8px; }
+        .status { display: flex; gap: 16px; }
+        .status__item { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+        .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); }
+        .dot--on { background: #10b981; }
+        .dot--off { background: #ef4444; }
+        .dot--warn { background: #f59e0b; }
+
+        /* Layout */
+        .container { max-width: 1280px; margin: 0 auto; padding: 16px 24px 40px; display: flex; flex-direction: column; gap: 14px; }
+        .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; }
+        .card__head { display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; border-bottom: 1px solid var(--border); }
+        .card__title { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+        .card__body { padding: 14px; }
+        .grid-2 { display: grid; grid-template-columns: 340px 1fr; gap: 14px; align-items: start; }
+        @media (max-width: 880px) { .grid-2 { grid-template-columns: 1fr; } }
+
+        /* Toolbar */
+        .toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+        .toolbar__label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--faint); margin-right: 2px; }
+        .toolbar__sep { width: 1px; align-self: stretch; background: var(--border); margin: 0 4px; }
+        .btn { font-size: 13px; padding: 7px 12px; border-radius: 6px; border: 1px solid var(--border-strong); background: var(--surface); color: #374151; cursor: pointer; font-weight: 500; transition: background 0.15s, border-color 0.15s; white-space: nowrap; }
+        .btn:hover { background: #f9fafb; }
+        .btn--primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+        .btn--primary:hover { background: var(--accent-hover); }
+        .btn--danger { border-color: #fecaca; color: var(--danger); background: var(--surface); }
+        .btn--danger:hover { background: var(--danger-bg); }
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .input { font-size: 13px; padding: 7px 10px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--surface); color: var(--text); font-family: inherit; }
+        .input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(79,70,229,0.12); }
+        .input--grow { flex: 1; min-width: 160px; }
+        .input--session { width: 150px; }
+
+        /* Notice banner */
+        .notice { padding: 9px 12px; border-radius: 6px; font-size: 13px; border: 1px solid transparent; display: flex; gap: 8px; align-items: baseline; }
+        .notice__tag { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; }
+        .notice--success { background: var(--success-bg); border-color: #a7f3d0; color: var(--success); }
+        .notice--error { background: var(--danger-bg); border-color: #fecaca; color: var(--danger); }
+        .notice--info { background: var(--info-bg); border-color: #bfdbfe; color: var(--info); }
+
+        /* Metrics strip */
+        .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); }
+        .metric { padding: 4px 16px; border-left: 1px solid var(--border); }
+        .metric:first-child { border-left: none; padding-left: 0; }
+        .metric__label { font-size: 11px; color: var(--muted); margin-bottom: 2px; }
+        .metric__value { font-size: 19px; font-weight: 600; font-variant-numeric: tabular-nums; }
+
+        /* Key-value (store stats) */
+        .kv__row { display: flex; align-items: center; justify-content: space-between; padding: 7px 0; border-bottom: 1px solid var(--border); }
+        .kv__row:last-child { border-bottom: none; }
+        .kv__key { color: var(--muted); }
+        .kv__val { font-weight: 600; font-variant-numeric: tabular-nums; }
+        .pill { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px; background: #f3f4f6; color: #374151; text-transform: capitalize; }
+        .pill--ok { background: var(--success-bg); color: var(--success); }
+
+        /* Events */
+        .events { max-height: 460px; overflow-y: auto; display: flex; flex-direction: column; }
+        .event { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-bottom: 1px solid var(--border); cursor: pointer; }
+        .event:last-child { border-bottom: none; }
+        .event:hover { background: #f9fafb; }
+        .event--selected { background: #f3f4f6; }
+        .event__bar { width: 3px; align-self: stretch; border-radius: 2px; flex: none; }
+        .event__type { font-family: var(--mono); font-size: 11px; font-weight: 600; min-width: 150px; }
+        .event__time { font-size: 11px; color: var(--faint); font-variant-numeric: tabular-nums; min-width: 64px; }
+        .event__preview { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; font-family: var(--mono); }
+        .event__idx { font-size: 11px; color: var(--faint); min-width: 28px; text-align: right; font-variant-numeric: tabular-nums; }
+        .code { background: #0f172a; color: #e2e8f0; padding: 12px; border-radius: 6px; font-size: 12px; font-family: var(--mono); overflow-x: auto; max-height: 320px; white-space: pre; }
+
+        /* Answer */
+        .answer__q { font-weight: 600; margin-bottom: 6px; }
+        .answer__a { white-space: pre-wrap; border-left: 2px solid var(--accent); padding-left: 12px; }
+        .answer__src { margin-top: 10px; font-size: 12px; color: var(--muted); font-family: var(--mono); }
+        .empty { text-align: center; padding: 28px 16px; color: var(--faint); font-size: 13px; }
+        .muted { color: var(--muted); }
     </style>
 </head>
 <body>
@@ -65,6 +118,7 @@
 
 <script>
     const { useState, useEffect, useRef } = React;
+    const h = React.createElement;
 
     const Dashboard = () => {
         const [metrics, setMetrics] = useState(null);
@@ -74,11 +128,13 @@
         const [serverStats, setServerStats] = useState(null);
         const [selectedEvent, setSelectedEvent] = useState(null);
         const [lastAnswer, setLastAnswer] = useState(null);
+        const [notice, setNotice] = useState(null);
+        const [query, setQuery] = useState('');
+        const [sessionId, setSessionId] = useState('');
         const wsRef = useRef(null);
 
-        // Helper: get server host (same as page origin)
         const getHost = () => window.location.hostname;
-        const getPort = () => 3000; // default RAG server port
+        const getPort = () => window.location.port || 3000;
 
         useEffect(() => {
             connectWebSocket();
@@ -91,252 +147,213 @@
                     fetchStatsHttp();
                 }
             }, 2000);
-            return () => {
-                clearInterval(metricsInterval);
-                if (wsRef.current) wsRef.current.close();
-            };
+            return () => { clearInterval(metricsInterval); if (wsRef.current) wsRef.current.close(); };
         }, []);
 
         const connectWebSocket = () => {
-            const wsUrl = `ws://${getHost()}:${getPort()}`;
-            const ws = new WebSocket(wsUrl);
+            const ws = new WebSocket(`ws://${getHost()}:${getPort()}`);
             wsRef.current = ws;
-
             ws.onopen = () => {
-                console.log('✅ WebSocket connected');
-                setWsConnected(true);
-                setConnected(true);
-                // Request initial data
+                setWsConnected(true); setConnected(true);
                 sendWS({ type: 'request:metrics' });
                 sendWS({ type: 'request:stats' });
                 sendWS({ type: 'request:event-log' });
             };
             ws.onmessage = (event) => {
-                try {
-                    const msg = JSON.parse(event.data);
-                    handleWSMessage(msg);
-                } catch(e) { console.error('WS parse error', e); }
+                try { handleWSMessage(JSON.parse(event.data)); } catch(e) { console.error('WS parse error', e); }
             };
-            ws.onclose = () => { setWsConnected(false); console.log('WS closed'); };
-            ws.onerror = (err) => { console.error('WS error', err); setWsConnected(false); };
+            ws.onclose = () => setWsConnected(false);
+            ws.onerror = () => setWsConnected(false);
         };
 
         const sendWS = (payload) => {
-            if (wsRef.current && wsRef.current.readyState === 1) {
-                wsRef.current.send(JSON.stringify(payload));
-            } else {
-                console.warn('WebSocket not ready');
-            }
+            if (wsRef.current && wsRef.current.readyState === 1) wsRef.current.send(JSON.stringify(payload));
+            else setNotice({ kind: 'error', text: 'WebSocket not connected.' });
         };
 
         const handleWSMessage = (msg) => {
             switch (msg.type) {
                 case 'connection:established':
-                    setMetrics(msg.data.metrics);
-                    setEvents(msg.data.recentEvents || []);
-                    break;
+                    setMetrics(msg.data.metrics); setEvents(msg.data.recentEvents || []); break;
                 case 'event':
-                    setEvents(prev => {
-                        const updated = [...prev, msg.data];
-                        if (updated.length > 200) updated.shift();
-                        return updated;
-                    });
-                    break;
-                case 'metrics':
-                    setMetrics(msg.data);
-                    setConnected(true);
-                    break;
-                case 'stats':
-                    setServerStats(msg.data);
-                    break;
-                case 'event-log':
-                    setEvents(msg.data);
-                    break;
-                case 'inject:result':
-                    console.log('Injection result:', msg.data);
-                    if (!msg.data.success) { alert(`❌ Injection failed: ${msg.data.error}`); break; }
-                    if (msg.data.mode === 'incremental') {
-                        const d = msg.data;
-                        alert(`✅ Incremental sync complete (${d.duration})\n` +
-                              `added: ${d.added}  changed: ${d.changed}  unchanged: ${d.unchanged}  removed: ${d.removed}\n` +
-                              `chunks (re)stored: ${d.chunksStored}`);
+                    setEvents(prev => { const u = [...prev, msg.data]; if (u.length > 200) u.shift(); return u; }); break;
+                case 'metrics': setMetrics(msg.data); setConnected(true); break;
+                case 'stats': setServerStats(msg.data); break;
+                case 'event-log': setEvents(msg.data); break;
+                case 'inject:result': {
+                    const d = msg.data;
+                    if (!d.success) { setNotice({ kind: 'error', text: `Injection failed: ${d.error}` }); break; }
+                    if (d.mode === 'incremental') {
+                        setNotice({ kind: 'success', text: `Incremental sync complete in ${d.duration} — added ${d.added}, changed ${d.changed}, unchanged ${d.unchanged}, removed ${d.removed} (chunks restored: ${d.chunksStored}).` });
                     } else {
-                        alert(`✅ Full rebuild complete: ${msg.data.chunksStored || msg.data.documentsProcessed} chunks stored.`);
+                        setNotice({ kind: 'success', text: `Full rebuild complete in ${d.duration} — ${d.documentsProcessed} docs, ${d.chunksStored} chunks stored.` });
                     }
                     break;
+                }
                 case 'retrieve:result':
-                    console.log('Retrieve result:', msg.data);
-                    alert(`Retrieved ${msg.data.resultsCount} documents.\nCheck console for details.`);
-                    break;
+                    setNotice({ kind: 'info', text: `Retrieved ${msg.data.resultsCount} chunk(s) in ${msg.data.duration}. Top match: ${msg.data.results?.[0]?.id || '—'}` }); break;
                 case 'ask:result':
-                    setLastAnswer(msg.data);
-                    alert(`Answer received for session "${msg.data.sessionId || 'anon'}"`);
-                    break;
+                    setLastAnswer(msg.data); setNotice({ kind: 'success', text: `Answer ready for session "${msg.data.sessionId || 'anon'}".` }); break;
                 case 'clear:result':
-                    alert('Vector store cleared.');
-                    break;
+                    setNotice({ kind: 'info', text: 'Vector store cleared.' }); break;
                 case 'error':
-                    console.error('Server error:', msg.data);
-                    alert(`Error: ${msg.data.message}`);
-                    break;
-                default:
-                    console.log('Unhandled WS message:', msg.type);
+                    setNotice({ kind: 'error', text: msg.data.message }); break;
+                default: break;
             }
         };
 
         const fetchMetricsHttp = async () => {
             try {
                 const res = await fetch(`http://${getHost()}:${getPort()}/metrics`);
-                if (res.ok) { const data = await res.json(); setMetrics(data); setConnected(true); }
-                else setConnected(false);
+                if (res.ok) { setMetrics(await res.json()); setConnected(true); } else setConnected(false);
             } catch(e) { setConnected(false); }
         };
         const fetchStatsHttp = async () => {
-            try {
-                const res = await fetch(`http://${getHost()}:${getPort()}/stats`);
-                if (res.ok) setServerStats(await res.json());
-            } catch(e) {}
+            try { const res = await fetch(`http://${getHost()}:${getPort()}/stats`); if (res.ok) setServerStats(await res.json()); } catch(e) {}
         };
 
+        const handleIncremental = () => sendWS({ type: 'request:inject-incremental' });
         const handleInject = () => {
-            if (confirm('⚠️ FULL REBUILD: this CLEARS the entire vector store and re‑embeds every .md file in ./input/. Use Incremental Sync for routine updates. Continue?')) {
+            if (confirm('Full rebuild clears the entire vector store and re-embeds every file in ./input. Use Incremental Sync for routine updates. Continue?'))
                 sendWS({ type: 'request:inject' });
-            }
         };
-        const handleIncremental = () => {
-            // Differential sync: re‑embeds only added/changed files, drops removed
-            // ones. No clear, so retrieval stays available. Safe to run routinely.
-            sendWS({ type: 'request:inject-incremental' });
-        };
-        const handleClear = () => {
-            if (confirm('Clear vector store without re‑injecting?')) sendWS({ type: 'request:clear' });
-        };
-        const handleRetrieve = () => {
-            const query = prompt('Enter search query:');
-            if (query) sendWS({ type: 'request:retrieve', query, topK: 5 });
-        };
-        const handleAsk = () => {
-            const query = prompt('Ask a question:');
-            if (!query) return;
-            const sessionId = prompt('Session ID (leave blank for new session):', '');
-            sendWS({
-                type: 'request:ask',
-                query,
-                sessionId: sessionId || undefined,
-                topK: 3
-            });
-        };
+        const handleClear = () => { if (confirm('Clear the vector store without re-injecting?')) sendWS({ type: 'request:clear' }); };
+        const handleRetrieve = () => { if (query.trim()) sendWS({ type: 'request:retrieve', query: query.trim(), topK: 5 }); };
+        const handleAsk = () => { if (query.trim()) sendWS({ type: 'request:ask', query: query.trim(), sessionId: sessionId.trim() || undefined, topK: 3 }); };
 
         const getEventColor = (type) => {
-            if (type.includes('complete') || type.includes('stored')) return '#10b981';
             if (type.includes('error')) return '#ef4444';
-            if (type.includes('start')) return '#3b82f6';
+            if (type.includes('complete') || type.includes('stored')) return '#10b981';
+            if (type.includes('start') || type.includes('diff')) return '#4f46e5';
             if (type.includes('queried') || type.includes('retrieved')) return '#f59e0b';
             if (type.includes('embedding')) return '#8b5cf6';
-            return '#6b7280';
+            return '#9ca3af';
         };
 
-        return React.createElement('div', { className: 'dashboard-container' },
-            React.createElement('header', { className: 'dashboard-header' },
-                React.createElement('div', { className: 'header-content' },
-                    React.createElement('h1', { className: 'header-title' }, '🤖 RAG Server Dashboard'),
-                    React.createElement('div', { className: 'status-badges' },
-                        React.createElement('div', { className: `badge ${connected ? 'connected' : 'disconnected'}` }, connected ? '✓ Connected' : '✗ HTTP Offline'),
-                        React.createElement('div', { className: `badge ${wsConnected ? 'connected' : 'warning'}` }, wsConnected ? '⚡ WebSocket' : '⚠️ WS Offline')
+        const metric = (label, value) => h('div', { className: 'metric' },
+            h('div', { className: 'metric__label' }, label),
+            h('div', { className: 'metric__value' }, value)
+        );
+        const kvRow = (key, val, pill) => h('div', { className: 'kv__row' },
+            h('span', { className: 'kv__key' }, key),
+            pill ? h('span', { className: `pill ${val === 'ready' ? 'pill--ok' : ''}` }, val) : h('span', { className: 'kv__val' }, val)
+        );
+
+        return h('div', null,
+            // Header
+            h('header', { className: 'app-header' },
+                h('div', { className: 'app-header__inner' },
+                    h('div', { className: 'app-title' }, 'RAG Server', h('span', null, 'Console')),
+                    h('div', { className: 'status' },
+                        h('div', { className: 'status__item' }, h('span', { className: `dot ${connected ? 'dot--on' : 'dot--off'}` }), connected ? 'HTTP' : 'HTTP offline'),
+                        h('div', { className: 'status__item' }, h('span', { className: `dot ${wsConnected ? 'dot--on' : 'dot--warn'}` }), wsConnected ? 'WebSocket' : 'WS offline')
                     )
                 )
             ),
-            React.createElement('main', { className: 'main-content' },
-                // Action Buttons
-                React.createElement('section', { className: 'section' },
-                    React.createElement('div', { className: 'button-group' },
-                        React.createElement('button', { className: 'btn', onClick: handleIncremental, title: 'Re‑embed only changed files (hash‑diff). No clear; retrieval stays live.' }, '🔄 Incremental Sync (delta only)'),
-                        React.createElement('button', { className: 'btn secondary', onClick: handleInject, title: 'Clear everything and re‑embed the whole ./input corpus.' }, '📥 Full Rebuild (clear + load ./input)'),
-                        React.createElement('button', { className: 'btn', onClick: handleRetrieve }, '🔍 Retrieve'),
-                        React.createElement('button', { className: 'btn', onClick: handleAsk }, '💬 Ask (RAG + history)'),
-                        React.createElement('button', { className: 'btn danger', onClick: handleClear }, '🗑️ Clear store')
+            h('div', { className: 'container' },
+
+                // Controls
+                h('div', { className: 'card' },
+                    h('div', { className: 'card__head' }, h('span', { className: 'card__title' }, 'Controls')),
+                    h('div', { className: 'card__body', style: { display: 'flex', flexDirection: 'column', gap: '12px' } },
+                        h('div', { className: 'toolbar' },
+                            h('span', { className: 'toolbar__label' }, 'Index'),
+                            h('button', { className: 'btn btn--primary', onClick: handleIncremental, title: 'Re-embed only changed files (hash diff). No clear; retrieval stays live.' }, 'Incremental Sync'),
+                            h('button', { className: 'btn', onClick: handleInject, title: 'Clear everything and re-embed the whole ./input corpus.' }, 'Full Rebuild'),
+                            h('div', { className: 'toolbar__sep' }),
+                            h('button', { className: 'btn btn--danger', onClick: handleClear }, 'Clear Store')
+                        ),
+                        h('div', { className: 'toolbar' },
+                            h('span', { className: 'toolbar__label' }, 'Query'),
+                            h('input', { className: 'input input--grow', placeholder: 'Enter a query…', value: query,
+                                onChange: e => setQuery(e.target.value), onKeyDown: e => { if (e.key === 'Enter') handleRetrieve(); } }),
+                            h('input', { className: 'input input--session', placeholder: 'session id (optional)', value: sessionId,
+                                onChange: e => setSessionId(e.target.value) }),
+                            h('button', { className: 'btn', onClick: handleRetrieve, disabled: !query.trim() }, 'Retrieve'),
+                            h('button', { className: 'btn btn--primary', onClick: handleAsk, disabled: !query.trim() }, 'Ask')
+                        ),
+                        notice && h('div', { className: `notice notice--${notice.kind}` },
+                            h('span', { className: 'notice__tag' }, notice.kind),
+                            h('span', null, notice.text)
+                        )
                     )
                 ),
 
                 // Metrics
-                React.createElement('section', { className: 'section' },
-                    React.createElement('h2', { className: 'section-title' }, '📊 Server Metrics'),
-                    metrics ? React.createElement('div', { className: 'metrics-grid' },
-                        React.createElement('div', { className: 'metric-card' }, React.createElement('div', { className: 'metric-icon' }, '⏱️'), React.createElement('div', { className: 'metric-content' }, React.createElement('div', { className: 'metric-label' }, 'Uptime'), React.createElement('div', { className: 'metric-value' }, metrics.uptimeFormatted))),
-                        React.createElement('div', { className: 'metric-card' }, React.createElement('div', { className: 'metric-icon' }, '📨'), React.createElement('div', { className: 'metric-content' }, React.createElement('div', { className: 'metric-label' }, 'Requests'), React.createElement('div', { className: 'metric-value' }, metrics.requestsTotal))),
-                        React.createElement('div', { className: 'metric-card' }, React.createElement('div', { className: 'metric-icon' }, '💾'), React.createElement('div', { className: 'metric-content' }, React.createElement('div', { className: 'metric-label' }, 'Injections'), React.createElement('div', { className: 'metric-value' }, metrics.injectionTotal))),
-                        React.createElement('div', { className: 'metric-card' }, React.createElement('div', { className: 'metric-icon' }, '🔍'), React.createElement('div', { className: 'metric-content' }, React.createElement('div', { className: 'metric-label' }, 'Retrievals'), React.createElement('div', { className: 'metric-value' }, metrics.retrievalTotal))),
-                        React.createElement('div', { className: 'metric-card' }, React.createElement('div', { className: 'metric-icon' }, '📈'), React.createElement('div', { className: 'metric-content' }, React.createElement('div', { className: 'metric-label' }, 'Embeddings'), React.createElement('div', { className: 'metric-value' }, metrics.embeddingsTotal))),
-                        React.createElement('div', { className: 'metric-card' }, React.createElement('div', { className: 'metric-icon' }, '👥'), React.createElement('div', { className: 'metric-content' }, React.createElement('div', { className: 'metric-label' }, 'Clients'), React.createElement('div', { className: 'metric-value' }, metrics.connectedClients)))
-                    ) : React.createElement('div', { className: 'loading' }, 'Loading metrics...')
-                ),
-
-                // Vector Store Stats
-                React.createElement('section', { className: 'section' },
-                    React.createElement('h2', { className: 'section-title' }, '🗄️ Vector Store (Chroma/Mock)'),
-                    serverStats ? React.createElement('div', { className: 'stats-grid' },
-                        React.createElement('div', { className: 'stat-box' }, React.createElement('div', { className: 'stat-label' }, 'Total Documents'), React.createElement('div', { className: 'stat-value' }, serverStats.totalDocuments ?? 0)),
-                        React.createElement('div', { className: 'stat-box' }, React.createElement('div', { className: 'stat-label' }, 'Embeddings'), React.createElement('div', { className: 'stat-value' }, serverStats.totalEmbeddings ?? '—')),
-                        React.createElement('div', { className: 'stat-box' }, React.createElement('div', { className: 'stat-label' }, 'Queries'), React.createElement('div', { className: 'stat-value' }, serverStats.queryCount ?? 0)),
-                        React.createElement('div', { className: 'stat-box' }, React.createElement('div', { className: 'stat-label' }, 'Status'), React.createElement('div', { className: 'stat-value' }, serverStats.status || 'ready'))
-                    ) : React.createElement('div', { className: 'loading' }, 'Loading stats...')
-                ),
-
-                // Last Answer Preview
-                lastAnswer && React.createElement('section', { className: 'section' },
-                    React.createElement('h2', { className: 'section-title' }, '💬 Last RAG Answer'),
-                    React.createElement('div', { className: 'answer-box' },
-                        React.createElement('div', { className: 'answer-title' }, `Q: ${lastAnswer.query} (session: ${lastAnswer.sessionId || 'anon'})`),
-                        React.createElement('div', { className: 'answer-content' }, lastAnswer.answer),
-                        React.createElement('div', { className: 'sources' }, `📄 Sources: ${lastAnswer.sources?.map(s => s.id).join(', ') || 'none'}`)
+                h('div', { className: 'card' },
+                    h('div', { className: 'card__head' }, h('span', { className: 'card__title' }, 'Server Metrics')),
+                    h('div', { className: 'card__body' },
+                        metrics ? h('div', { className: 'metrics' },
+                            metric('Uptime', metrics.uptimeFormatted),
+                            metric('Requests', metrics.requestsTotal),
+                            metric('Injections', metrics.injectionTotal),
+                            metric('Retrievals', metrics.retrievalTotal),
+                            metric('Embeddings', metrics.embeddingsTotal),
+                            metric('Clients', metrics.connectedClients)
+                        ) : h('div', { className: 'empty' }, 'Loading metrics…')
                     )
                 ),
 
-                // Event Timeline
-                React.createElement('section', { className: 'section' },
-                    React.createElement('div', { className: 'event-header' },
-                        React.createElement('h2', { className: 'section-title' }, '📡 Real‑time Events'),
-                        React.createElement('div', { className: 'button-group' },
-                            React.createElement('button', { className: 'btn secondary', onClick: () => sendWS({ type: 'request:event-log' }) }, 'Refresh Log')
+                // Two column: store + answer | events
+                h('div', { className: 'grid-2' },
+                    h('div', { style: { display: 'flex', flexDirection: 'column', gap: '14px' } },
+                        h('div', { className: 'card' },
+                            h('div', { className: 'card__head' }, h('span', { className: 'card__title' }, 'Vector Store')),
+                            h('div', { className: 'card__body' },
+                                serverStats ? h('div', null,
+                                    kvRow('Documents', serverStats.totalDocuments ?? 0),
+                                    kvRow('Queries', serverStats.queryCount ?? 0),
+                                    kvRow('Status', serverStats.status || 'ready', true)
+                                ) : h('div', { className: 'empty' }, 'Loading…')
+                            )
+                        ),
+                        lastAnswer && h('div', { className: 'card' },
+                            h('div', { className: 'card__head' }, h('span', { className: 'card__title' }, 'Last Answer')),
+                            h('div', { className: 'card__body answer' },
+                                h('div', { className: 'answer__q' }, lastAnswer.query, h('span', { className: 'muted' }, `  ·  session: ${lastAnswer.sessionId || 'anon'}`)),
+                                h('div', { className: 'answer__a' }, lastAnswer.answer),
+                                h('div', { className: 'answer__src' }, `sources: ${lastAnswer.sources?.map(s => s.id).join(', ') || 'none'}`)
+                            )
                         )
                     ),
-                    React.createElement('div', { className: 'event-container' },
-                        events.length === 0 ? React.createElement('div', { className: 'empty-state' }, '👀 Waiting for events...') :
-                            events.slice().reverse().map((event, idx) => {
-                                const time = new Date(event.timestamp).toLocaleTimeString();
-                                const shortType = event.type.split(':').pop();
-                                const color = getEventColor(event.type);
-                                return React.createElement('div', {
-                                    key: idx,
-                                    className: `event-item ${selectedEvent === idx ? 'selected' : ''}`,
-                                    style: { borderLeftColor: color },
-                                    onClick: () => setSelectedEvent(selectedEvent === idx ? null : idx)
-                                },
-                                    React.createElement('div', { className: 'event-item-content' },
-                                        React.createElement('div', { className: 'event-type' },
-                                            React.createElement('span', { className: 'event-type-badge', style: { backgroundColor: color } }, shortType),
-                                            React.createElement('span', { className: 'event-time' }, time)
-                                        ),
-                                        event.data && Object.keys(event.data).length > 0 &&
-                                            React.createElement('div', { className: 'event-preview' }, JSON.stringify(event.data).slice(0, 100).replace(/[{}\"]/g, '') + '...')
-                                    ),
-                                    React.createElement('div', { className: 'event-index' }, events.length - idx)
-                                );
-                            })
-                    )
-                ),
 
-                selectedEvent !== null && events[selectedEvent] &&
-                React.createElement('section', { className: 'section' },
-                    React.createElement('h2', { className: 'section-title' }, '🔎 Event Details'),
-                    React.createElement('pre', { className: 'event-details-code' }, JSON.stringify(events[selectedEvent], null, 2))
+                    h('div', { className: 'card' },
+                        h('div', { className: 'card__head' },
+                            h('span', { className: 'card__title' }, `Events · ${events.length}`),
+                            h('button', { className: 'btn', onClick: () => sendWS({ type: 'request:event-log' }) }, 'Refresh')
+                        ),
+                        h('div', { className: 'events' },
+                            events.length === 0 ? h('div', { className: 'empty' }, 'Waiting for events…') :
+                                events.slice().reverse().map((event, ri) => {
+                                    const idx = events.length - 1 - ri;
+                                    const time = new Date(event.timestamp).toLocaleTimeString();
+                                    const color = getEventColor(event.type);
+                                    const preview = event.data && Object.keys(event.data).length
+                                        ? JSON.stringify(event.data).replace(/[{}"]/g, '').slice(0, 80) : '';
+                                    return h('div', {
+                                        key: idx,
+                                        className: `event ${selectedEvent === idx ? 'event--selected' : ''}`,
+                                        onClick: () => setSelectedEvent(selectedEvent === idx ? null : idx)
+                                    },
+                                        h('span', { className: 'event__bar', style: { background: color } }),
+                                        h('span', { className: 'event__type', style: { color } }, event.type),
+                                        h('span', { className: 'event__time' }, time),
+                                        h('span', { className: 'event__preview' }, preview),
+                                        h('span', { className: 'event__idx' }, idx + 1)
+                                    );
+                                })
+                        ),
+                        selectedEvent !== null && events[selectedEvent] &&
+                            h('div', { className: 'card__body', style: { borderTop: '1px solid var(--border)' } },
+                                h('pre', { className: 'code' }, JSON.stringify(events[selectedEvent], null, 2))
+                            )
+                    )
                 )
             )
         );
     };
 
-    const root = ReactDOM.createRoot(document.getElementById('root'));
-    root.render(React.createElement(Dashboard));
+    ReactDOM.createRoot(document.getElementById('root')).render(h(Dashboard));
 </script>
 </body>
 </html>

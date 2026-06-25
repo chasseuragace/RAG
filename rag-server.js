@@ -21,12 +21,16 @@ const { chunkText } = require('./src/core/chunker');
 const { setupTests } = require('./tests/mock.test');
 const { setupRealTests } = require('./tests/real.test');
 const { runDeltaTests } = require('./tests/delta.test');
+const { runChromaTests } = require('./tests/chroma.test');
 
 async function main() {
   const args = process.argv.slice(2);
   if (args.includes('--delta-test')) {
     try { await runDeltaTests(); process.exit(0); }
     catch (e) { console.error('\n❌ Delta tests failed:', e.message); process.exit(1); }
+  } else if (args.includes('--chroma-test')) {
+    try { await runChromaTests(); process.exit(0); }
+    catch (e) { console.error('\n❌ Chroma tests failed:', e.message); process.exit(1); }
   } else if (args.includes('--test')) {
     const runner = await setupTests();
     const ok = await runner.run();

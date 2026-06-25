@@ -276,6 +276,13 @@ node rag-server.js --delta-test  # or: npm run test:delta
 ```
 Self-contained suite covering the delta path: large-doc chunking, zero re‑embed on unchanged files, **orphan-chunk removal when a file shrinks**, removal handling, and that a full `run()` populates the registry so the next incremental does no double work.
 
+### Run Chroma Delete Test (requires only a running Chroma)
+```bash
+docker compose up -d                 # start Chroma on :8000
+node rag-server.js --chroma-test     # or: npm run test:chroma
+```
+Verifies the one capability the mock can't prove: live filtered **delete‑by‑doc‑id** (`DELETE where original_id == X`), including the orphan case when a doc is re‑added with fewer chunks. Uses dummy vectors, so no Gemini/Novita keys are needed.
+
 ### Run Real Integration Tests (requires Chroma, Gemini, Novita)
 ```bash
 node rag-server.js --real-test
