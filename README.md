@@ -2,17 +2,22 @@
 
 ## Overview
 
-A complete, single‑file RAG (Retrieval‑Augmented Generation) implementation with **real integrations** (Gemini embeddings, Chroma vector DB, Novita DeepSeek inference), **WebSocket telemetry**, **automatic chunking** of large Markdown files, and **conversation memory** per session.  
+A modular RAG (Retrieval‑Augmented Generation) implementation with **real integrations** (Gemini embeddings, Chroma vector DB, Novita DeepSeek inference), **WebSocket telemetry**, **automatic chunking** of large Markdown files, **incremental (differential) sync** so only changed files are re‑embedded, and **conversation memory** per session.  
 Designed to be extended by a frontend dashboard: inject documents, monitor progress in real time, and chat with full RAG + history.
 
 ```
 ✅ Real mode: Gemini Embeddings + Chroma + Novita DeepSeek
 ✅ Mock mode for testing (no external APIs)
 ✅ WebSocket & SSE real‑time events
-✅ Injection = clear + chunk + embed + store (no duplicates)
+✅ Full inject (clear + chunk + embed + store) — escape hatch
+✅ Incremental sync — hash‑diff, re‑embed only the delta, no retrieval blackout
 ✅ Conversation history (JSON file based)
 ✅ REST API + WebSocket commands
 ```
+
+> **Layout:** the implementation lives under `src/` (config, events, core, loaders,
+> embedders, stores, inference, pipelines, server) with tests under `tests/`.
+> `rag-server.js` is a thin CLI entry point that parses argv and dispatches.
 
 ---
 
@@ -26,11 +31,21 @@ Designed to be extended by a frontend dashboard: inject documents, monitor progr
 ├────────────────────────────────────────────────────────────────────┤
 │                                                                    │
 │  INJECTION PIPELINE (triggered by frontend or API)                │
+│                                                                    │
+│  Full rebuild  (/inject):                                         │
 │  ┌────────────┐    ┌────────────┐    ┌───────────┐    ┌────────┐ │
 │  │ Clear DB   │ →  │ Load .md   │ →  │ Chunk     │ →  │ Embed  │ │
 │  │ (Chroma)   │    │ (input/)   │    │ (overlap) │    │(Gemini)│ │
 │  └────────────┘    └────────────┘    └───────────┘    └────────┘ │
-│                                                           ↓        │
+│                                                                    │
+│  Incremental  (/inject-incremental):                              │
+│  ┌────────────┐    ┌────────────────────┐    ┌──────────────────┐ │
+│  │ Load .md   │ →  │ Diff vs registry   │ →  │ For each delta:  │ │
+│  │ (input/)   │    │ (SHA256 hash)      │    │ delete old chunks│ │
+│  └────────────┘    │ added/changed/     │    │ then embed+store │ │
+│                    │ unchanged/removed  │    │ (no global clear)│ │
+│                    └────────────────────┘    └──────────────────┘ │
+│       ↑ doc-registry.json = source of truth ↑          ↓          │
 │                                                    ┌────────────┐ │
 │                                                    │ Store in   │ │
 │                                                    │ Chroma     │ │
@@ -60,6 +75,34 @@ Designed to be extended by a frontend dashboard: inject documents, monitor progr
 
 - **`./input/`** – Place your `.md` files here. Injection reads from this folder.
 - **`./conversations/`** – JSON files storing chat history per `sessionId`.
+- **`./data/doc-registry.json`** – Registry of what is embedded (`docId → {hash, size, mtime, chunkCount, lastIndexedAt}`); the source of truth used by incremental sync.
+
+### Source Layout
+
+```
+rag-server.js                 # CLI entry: parse argv → dispatch
+src/
+├── config.js                 # env vars + directory bootstrap
+├── events.js                 # ServerEvents bus + metrics (shared singleton)
+├── core/
+│   ├── chunker.js            # deterministic per-doc chunking
+│   ├── registry.js           # DocRegistry + hashContent (diff classifier)
+│   ├── conversation.js       # ConversationStore (per-session history)
+│   └── interfaces.js         # abstract base classes (the seams)
+├── loaders/   mock.js real.js
+├── embedders/ mock.js gemini.js
+├── stores/    mock.js chroma.js      # incl. deleteByDocId (filtered delete)
+├── inference/ novita.js
+├── pipelines/
+│   ├── injection.js          # run() full rebuild + runIncremental() delta
+│   └── retrieval.js
+└── server.js                 # HTTP + WebSocket wiring
+tests/
+├── runner.js                 # TestRunner + Assert
+├── mock.test.js              # --test  (mock unit tests)
+├── delta.test.js             # --delta-test  (incremental sync)
+└── real.test.js              # --real-test  (live integration)
+```
 
 ---
 
@@ -79,9 +122,8 @@ Designed to be extended by a frontend dashboard: inject documents, monitor progr
 ### Install & Run
 
 ```bash
-# Clone / create the single file (rag-server.js)
-npm install ws   # optional, for WebSocket support
-mkdir input conversations
+npm install        # installs ws (for WebSocket support)
+# ./input, ./conversations and ./data are auto-created on first run.
 # Place your .md files inside ./input/
 
 # Start the server in REAL mode
@@ -105,15 +147,23 @@ Server runs at `http://localhost:3000` (or custom port with `--port`).
 | GET    | `/metrics`     | Real‑time server metrics (requests, latencies, errors, uptime)             |
 | GET    | `/stats`       | Vector store statistics (number of stored chunks)                          |
 | GET    | `/events`      | Server‑Sent Events (SSE) – real‑time event stream                          |
-| POST   | `/inject`      | **Clear Chroma + read ./input + chunk + embed + store**                    |
-| POST   | `/clear`       | Clear vector store **without** re‑injecting                                 |
-| POST   | `/retrieve`    | Retrieve relevant chunks (no LLM) – body: `{query, topK?}`                 |
-| POST   | `/ask`         | Full RAG with conversation history – body: `{query, sessionId?, topK?}`    |
+| POST   | `/inject`             | **Full rebuild** – clear Chroma + read ./input + chunk + embed + store (rebuilds the registry to match) |
+| POST   | `/inject-incremental` | **Differential sync** – hash‑diff vs registry, re‑embed only added/changed files, delete removed ones (no global clear) |
+| POST   | `/clear`              | Clear vector store **without** re‑injecting (also wipes the registry)       |
+| POST   | `/retrieve`           | Retrieve relevant chunks (no LLM) – body: `{query, topK?}`                 |
+| POST   | `/ask`                | Full RAG with conversation history – body: `{query, sessionId?, topK?}`    |
 
-**Example `/inject` call (clears and injects from `./input`):**
+**Example full rebuild (clears and injects everything from `./input`):**
 ```bash
 curl -X POST http://localhost:3000/inject
 ```
+
+**Example incremental sync (re‑embeds only what changed since last run):**
+```bash
+curl -X POST http://localhost:3000/inject-incremental
+# → { "added": 2, "changed": 5, "unchanged": 93, "removed": 1, "chunksStored": 18, ... }
+```
+Use `/inject-incremental` for routine/daily refreshes; reserve `/inject` for first‑time loads or when you want to force a clean rebuild.
 
 **Example `/ask` with session memory:**
 ```bash
@@ -133,6 +183,7 @@ Connect to `ws://localhost:3000` and send JSON messages:
 | `request:event-log`       | `{"type":"request:event-log"}`                           | Last 1000 events                         |
 | `request:stats`           | `{"type":"request:stats"}`                               | Vector store stats                       |
 | `request:inject`          | `{"type":"request:inject"}`                              | `{"type":"inject:result","data":{...}}`  |
+| `request:inject-incremental` | `{"type":"request:inject-incremental"}`               | `{"type":"inject:result","data":{added,changed,unchanged,removed,...}}` |
 | `request:clear`           | `{"type":"request:clear"}`                               | `{"type":"clear:result"}`                |
 | `request:retrieve`        | `{"type":"request:retrieve","query":"AI","topK":5}`      | Retrieved chunks                         |
 | `request:ask`             | `{"type":"request:ask","query":"What is RAG?","sessionId":"user123","topK":3}` | Answer + sources + sessionId |
@@ -144,7 +195,7 @@ All server events are broadcast to all connected WebSocket clients (e.g., `injec
 
 ## 🧠 Feature Details
 
-### 1. Injection Pipeline (Idempotent)
+### 1. Injection — Full Rebuild
 
 - **Clears** the entire Chroma collection.
 - Recursively reads all `.md` files from `./input/`.
@@ -153,9 +204,24 @@ All server events are broadcast to all connected WebSocket clients (e.g., `injec
   - `CHUNK_OVERLAP` (default 200)
   - Paragraph‑ and sentence‑aware cut points.
 - Embeds each chunk with **Gemini Embedding API**.
-- Stores each chunk as a separate document in Chroma (metadata includes original file, chunk index).
+- Stores each chunk as a separate document in Chroma (metadata includes original file, chunk index, `original_id`).
+- **Rebuilds `doc-registry.json`** to mirror exactly what was embedded, so a subsequent incremental run sees everything as unchanged (no double work).
 
 Trigger via `POST /inject` or WebSocket `request:inject`.
+
+### 1b. Injection — Incremental (Differential) Sync
+
+For routine refreshes where only some files change, this avoids re‑embedding the whole corpus:
+
+- Loads `./input` and **diffs each file against the registry by SHA256 content hash**, classifying into `added / changed / unchanged / removed`.
+- **Unchanged** files are skipped entirely (no embedding cost).
+- **Changed** files: old chunks are deleted first (`deleteByDocId` via `original_id`), then the new version is chunked, embedded and stored. Deleting first means that when a file *shrinks* (fewer chunks than before), no orphan chunks survive.
+- **Removed** files: their chunks and registry entry are deleted.
+- The store is **never globally cleared**, so retrieval stays available throughout — no blackout window.
+
+Chunk IDs are stable (`{docId}_chunk_{index}`) and chunking is deterministic per document, so a single file change ripples only that file's chunks.
+
+Trigger via `POST /inject-incremental` or WebSocket `request:inject-incremental`.
 
 ### 2. RAG Chat with Conversation History
 
@@ -186,6 +252,7 @@ Events are also available via SSE at `/events`.
 | `RAG_INPUT_DIR`      | `./input`              | Folder containing `.md` files to inject       |
 | `RAG_CHUNK_SIZE`     | `1000`                 | Max characters per chunk                      |
 | `RAG_CHUNK_OVERLAP`  | `200`                  | Overlap between consecutive chunks            |
+| `RAG_REGISTRY_FILE`  | `./data/doc-registry.json` | Path to the incremental-sync registry      |
 | `GEMINI_API_KEY`     | (required for real)    | Google Gemini API key                          |
 | `AI_STUDIO_API_KEY`  | (alternative)          | Same as Gemini key                             |
 | `NOVITA_API_KEY`     | (required for real)    | Novita AI API key for DeepSeek                 |
@@ -199,9 +266,15 @@ You can also set `--real` flag to use real APIs; without it, the server runs in 
 
 ### Run Mock Test Suite (no external dependencies)
 ```bash
-node rag-server.js --test
+node rag-server.js --test       # or: npm test
 ```
-All tests (document loading, embedding consistency, vector search, pipelines) should pass.
+Tests chunking, embedding consistency, vector search, `deleteByDocId`, and the registry diff classifier.
+
+### Run Delta (Incremental Sync) Tests (no external dependencies)
+```bash
+node rag-server.js --delta-test  # or: npm run test:delta
+```
+Self-contained suite covering the delta path: large-doc chunking, zero re‑embed on unchanged files, **orphan-chunk removal when a file shrinks**, removal handling, and that a full `run()` populates the registry so the next incremental does no double work.
 
 ### Run Real Integration Tests (requires Chroma, Gemini, Novita)
 ```bash
@@ -215,14 +288,20 @@ Tests real connectivity: Chroma heartbeat, embedding generation, storing/queryin
 
 ```
 .
-├── rag-server.js
+├── rag-server.js              # CLI entry point
+├── src/                       # implementation (see Source Layout above)
+├── tests/                     # mock, delta, real test suites
+├── public/
+│   └── dashboard.html         # built-in monitoring/control UI
 ├── input/                     # Place your .md files here
 │   ├── doc1.md
 │   └── doc2.md
 ├── conversations/             # Auto‑created, JSON chat logs
 │   ├── user123.json
 │   └── anon_1623456789.json
-└── (optional) package.json    # if you install ws
+├── data/
+│   └── doc-registry.json      # Auto‑created, incremental-sync source of truth
+└── package.json
 ```
 
 ---
@@ -242,22 +321,28 @@ No extra endpoints needed – the current API already supports all dashboard nee
 
 ## 🛠️ Development & Extension
 
-All core classes are exported for custom scripts:
+Common classes are re‑exported from the entry point for quick scripts:
 
 ```javascript
-const { 
-  RAGServer, serverEvents, 
-  GeminiEmbedder, ChromaVectorStore, NovitaInference,
-  ConversationStore, chunkText 
-} = require('./rag-server.js');
+const { RAGServer, serverEvents, ConversationStore, DocRegistry, chunkText } = require('./rag-server.js');
 ```
 
-Example: Manually run injection from a script:
+…or import any module directly from `src/`:
 
 ```javascript
+const { GeminiEmbedder } = require('./src/embedders/gemini');
+const { ChromaVectorStore } = require('./src/stores/chroma');
+const { NovitaInference } = require('./src/inference/novita');
+```
+
+Example: manually run a full inject, then an incremental sync, from a script:
+
+```javascript
+const { RAGServer } = require('./rag-server.js');
 const server = new RAGServer(3000, true);
 await server.initialize();
-await server.injectionPipeline.run('./input');
+await server.injectionPipeline.run('./input', server.registry);            // full rebuild
+await server.injectionPipeline.runIncremental('./input', server.registry); // delta only
 ```
 
 ---
@@ -275,7 +360,13 @@ await server.injectionPipeline.run('./input');
 ## ❓ FAQ
 
 **Q: Why does `/inject` clear everything first?**  
-A: To avoid duplicates and stale data. The input directory is the single source of truth. Every injection is a full refresh.
+A: It's the full‑rebuild escape hatch — a guaranteed clean slate from `./input`. For routine refreshes prefer `/inject-incremental`, which re‑embeds only changed files and never clears the store.
+
+**Q: Should I re‑embed everything every day?**  
+A: No. Use `/inject-incremental`. It hash‑diffs `./input` against `./data/doc-registry.json` and only re‑embeds added/changed files (deleting chunks for removed ones). If 35 of 100 files change, you embed ~35 files, not 100 — and retrieval never goes dark during the update.
+
+**Q: What happens if the registry and the vector store drift apart?**  
+A: Run a full `/inject` — it rebuilds both from `./input` and re‑syncs the registry to match. `/clear` wipes both as well.
 
 **Q: How do I change the chunk size?**  
 A: Set `RAG_CHUNK_SIZE` env variable or modify the constants at the top of the file.
@@ -296,30 +387,23 @@ A: Omit the `--real` flag: `node rag-server.js --server`. It uses in‑memory st
 
 ## 🧾 License & Status
 
-**Status:** Production‑ready for dashboard integration.  
-**Future enhancements:** streaming answers, file watching (auto‑inject on change), multi‑user auth, advanced chunking strategies.
+**Status:** Proof‑of‑concept / exploration. Suitable for dashboard integration and local experimentation, not yet hardened for production (no auth, no indexing `status` column, per‑doc rather than transactional atomicity).  
+**Future enhancements:** file watching (auto‑incremental on change), an indexing `status` (pending/indexed/failed) so queries only see fully‑indexed docs, streaming answers, multi‑user auth, advanced chunking strategies.
 
 ---
 
 ## ✅ How to use the dashboard
 
+The dashboard lives at **`public/dashboard.html`** and is served directly by the RAG server.
 
-2. **Start your RAG server** (real or mock):
+1. **Start your RAG server** (real or mock):
    ```bash
    node rag-server.js --server --real   # or --server for mock mode
    ```
-3. **Open the dashboard** in a browser: `http://localhost:3000/dashboard.html` (or just double‑click the file if served via file:// – but WebSocket will only work if the page is served from the same origin; easiest: open `http://localhost:3000` and navigate to `/dashboard.html` or use a simple static file server).
+2. **Open the dashboard** in a browser: `http://localhost:3000/` (which redirects to `/dashboard.html`). Because the page is served from the same origin as the server, the WebSocket connects to `ws://localhost:3000` with no CORS or mixed‑content issues.
 
-   > If you double‑click the HTML file, the browser may block WebSocket connections due to mixed content. Serve it via the same port using a tiny static server or simply place it in the same directory and access via `http://localhost:3000/dashboard.html` (the RAG server does **not** serve static files by default; you can use `npx serve .` on port 8080 and point the dashboard to `ws://localhost:3000`).  
-
-   **Simplest fix** – serve the dashboard with the RAG server’s own HTTP server: modify `rag-server.js` to serve static files for `/dashboard.html`. But for quick testing, just open the HTML file and accept the mixed‑content warning? Alternatively, run a separate static server:
-   ```bash
-   npx serve . -p 8080
-   ```
-   Then open `http://localhost:8080/dashboard.html` – the WebSocket will connect to `ws://localhost:3000` (no CORS issues).
-
-4. **Interact**:
-   - **Inject** – clears Chroma, reads `./input/*.md`, chunks, embeds, stores.
+3. **Interact**:
+   - **Inject** – full rebuild: clears Chroma, reads `./input/*.md`, chunks, embeds, stores.
    - **Retrieve** – test retrieval without LLM.
    - **Ask** – full RAG with conversation history (sessionId stored in `./conversations/`).
    - **Clear** – only clears vector store (no re‑injection).
@@ -338,5 +422,5 @@ The dashboard is fully self‑contained, no build step required. It matches the 
 
 Refer to [System Evaluation Report](Report.md)
 
-*Updated: 2026-05-20*  
-*Corresponds to `rag-server.js` with WebSocket, chunking, conversation history, and real API integrations.*
+*Updated: 2026-06-25*  
+*Corresponds to the modular `src/` layout with WebSocket, chunking, conversation history, incremental (differential) sync, and real API integrations.*
