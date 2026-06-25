@@ -6,6 +6,7 @@
   "type": "commonjs",
   "scripts": {
     "test": "node rag-server.js --test",
+    "test:delta": "node rag-server.js --delta-test",
     "server": "node rag-server.js --server",
     "dev": "node rag-server.js --server --port 3000",
     "help": "node rag-server.js"

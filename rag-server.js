@@ -11,6 +11,7 @@
 const fs = require('fs');
 const path = require('path');
 const http = require('http');
+const crypto = require('crypto');
 const { EventEmitter } = require('events');
 
 // WebSocket optional
@@ -30,9 +31,11 @@ const INPUT_DIR = process.env.RAG_INPUT_DIR || './input';
 const CHUNK_SIZE = parseInt(process.env.RAG_CHUNK_SIZE) || 1000;      // characters
 const CHUNK_OVERLAP = parseInt(process.env.RAG_CHUNK_OVERLAP) || 200;
 const CONVERSATIONS_DIR = './conversations';
+const REGISTRY_FILE = process.env.RAG_REGISTRY_FILE || './data/doc-registry.json';
 // Ensure directories exist
 if (!fs.existsSync(INPUT_DIR)) fs.mkdirSync(INPUT_DIR, { recursive: true });
 if (!fs.existsSync(CONVERSATIONS_DIR)) fs.mkdirSync(CONVERSATIONS_DIR, { recursive: true });
+if (!fs.existsSync(path.dirname(REGISTRY_FILE))) fs.mkdirSync(path.dirname(REGISTRY_FILE), { recursive: true });
 
 // ============================================================================
 // EVENT SYSTEM (unchanged)
@@ -91,6 +94,53 @@ class ConversationStore {
 }
 
 // ============================================================================
+// DOC REGISTRY  (source of truth for what is in the vector store)
+// ----------------------------------------------------------------------------
+// JSON-file backed map: docId -> { hash, size, mtime, chunkCount, lastIndexedAt }
+// Used by the incremental injection pipeline to diff incoming files against
+// what has already been embedded, so only the delta is re-embedded.
+// ============================================================================
+function hashContent(text) {
+  return crypto.createHash('sha256').update(text, 'utf8').digest('hex');
+}
+
+class DocRegistry {
+  constructor(filePath = REGISTRY_FILE) {
+    this.filePath = filePath;
+    this.docs = this._load();
+  }
+  _load() {
+    if (fs.existsSync(this.filePath)) {
+      try { return JSON.parse(fs.readFileSync(this.filePath, 'utf8')); } catch (e) { return {}; }
+    }
+    return {};
+  }
+  _save() { fs.writeFileSync(this.filePath, JSON.stringify(this.docs, null, 2)); }
+  get(docId) { return this.docs[docId]; }
+  set(docId, record) { this.docs[docId] = record; this._save(); }
+  remove(docId) { delete this.docs[docId]; this._save(); }
+  allIds() { return Object.keys(this.docs); }
+  /**
+   * Classify loaded documents against the registry by content hash.
+   * Mutates each loaded doc with `_hash` so callers don't re-hash.
+   * Returns { added, changed, unchanged, removed }.
+   */
+  diff(loadedDocs) {
+    const incoming = new Set(loadedDocs.map(d => d.id));
+    const added = [], changed = [], unchanged = [];
+    for (const doc of loadedDocs) {
+      doc._hash = hashContent(doc.content);
+      const prev = this.docs[doc.id];
+      if (!prev) added.push(doc);
+      else if (prev.hash !== doc._hash) changed.push(doc);
+      else unchanged.push(doc);
+    }
+    const removed = Object.keys(this.docs).filter(id => !incoming.has(id));
+    return { added, changed, unchanged, removed };
+  }
+}
+
+// ============================================================================
 // TEXT CHUNKING UTILITY
 // ============================================================================
 function chunkText(text, maxSize = CHUNK_SIZE, overlap = CHUNK_OVERLAP) {
@@ -120,7 +170,7 @@ function chunkText(text, maxSize = CHUNK_SIZE, overlap = CHUNK_OVERLAP) {
 // ============================================================================
 class DocumentLoader { async loadDocuments(folderPath) { throw new Error('not implemented'); } }
 class Embedder { async embed(text) { throw new Error('not implemented'); } async embedBatch(texts) { throw new Error('not implemented'); } }
-class VectorStore { async store(id, embedding, metadata) { throw new Error('not implemented'); } async query(queryEmbedding, topK) { throw new Error('not implemented'); } async clear() { throw new Error('not implemented'); } async getStats() { throw new Error('not implemented'); } }
+class VectorStore { async store(id, embedding, metadata) { throw new Error('not implemented'); } async query(queryEmbedding, topK) { throw new Error('not implemented'); } async clear() { throw new Error('not implemented'); } async deleteByDocId(docId) { throw new Error('not implemented'); } async getStats() { throw new Error('not implemented'); } }
 class InjectionPipeline { constructor(loader, embedder, store) { this.loader = loader; this.embedder = embedder; this.store = store; } async run(folderPath) { throw new Error('not implemented'); } }
 class RetrievalPipeline { constructor(embedder, store) { this.embedder = embedder; this.store = store; } async run(query, topK) { throw new Error('not implemented'); } }
 
@@ -161,6 +211,14 @@ class MockVectorStore extends VectorStore {
   _cosineSimilarity(a,b) { let dot=0, normA=0, normB=0; for(let i=0;i<a.length;i++) { dot+=a[i]*b[i]; normA+=a[i]*a[i]; normB+=b[i]*b[i]; } normA=Math.sqrt(normA); normB=Math.sqrt(normB); return normA&&normB?dot/(normA*normB):0; }
   async query(q, topK=5) { const start=Date.now(); this.queryCount++; const results=[]; for(const[id,{embedding,metadata}] of this.docs) results.push({id,score:this._cosineSimilarity(q,embedding),metadata}); const sorted=results.sort((a,b)=>b.score-a.score).slice(0,topK); serverEvents.logEvent('vectorstore:queried',{count:sorted.length,duration:Date.now()-start}); return sorted; }
   async clear() { this.docs.clear(); this.queryCount=0; serverEvents.logEvent('vectorstore:cleared',{}); }
+  async deleteByDocId(docId) {
+    let removed = 0;
+    for (const [id, { metadata }] of this.docs) {
+      if (metadata && metadata.original_id === docId) { this.docs.delete(id); removed++; }
+    }
+    serverEvents.logEvent('vectorstore:deleted', { docId, removed });
+    return removed;
+  }
   async getStats() { return { totalDocuments: this.docs.size, queryCount: this.queryCount }; }
 }
 
@@ -297,6 +355,15 @@ class ChromaVectorStore extends VectorStore {
     this.collectionId = null;
     serverEvents.logEvent('vectorstore:cleared', {});
   }
+  async deleteByDocId(docId) {
+    const colId = await this._ensureCollection();
+    const res = await fetch(`${this.baseUrl}/api/v2/tenants/${this.tenant}/databases/${this.database}/collections/${colId}/delete`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ where: { original_id: docId } })
+    });
+    if (!res.ok) throw new Error(`Chroma delete error: ${res.status}`);
+    serverEvents.logEvent('vectorstore:deleted', { docId });
+  }
   async getStats() {
     try {
       const colId = await this._ensureCollection();
@@ -393,6 +460,73 @@ class ConcreteInjectionPipeline extends InjectionPipeline {
       return { success: false, error: err.message, duration: `${Date.now() - start}ms` };
     }
   }
+
+  // Chunk + embed + store a single document. Caller is responsible for
+  // deleting any previous chunks of this doc first (see runIncremental).
+  async _indexDoc(doc) {
+    const textChunks = chunkText(doc.content, CHUNK_SIZE, CHUNK_OVERLAP);
+    const chunks = textChunks.map((content, i) => ({
+      id: `${doc.id}_chunk_${i}`,
+      content,
+      metadata: { ...doc.metadata, chunk_index: i, total_chunks: textChunks.length, original_id: doc.id }
+    }));
+    const embeddings = await this.embedder.embedBatch(chunks.map(c => c.content));
+    for (let i = 0; i < chunks.length; i++) {
+      await this.store.store(chunks[i].id, embeddings[i], { ...chunks[i].metadata, content: chunks[i].content });
+    }
+    return chunks.length;
+  }
+
+  // Differential sync: only re-embed added/changed docs, delete removed docs.
+  // Never clears the whole store, so retrieval stays available throughout.
+  async runIncremental(folderPath, registry) {
+    const start = Date.now();
+    serverEvents.logEvent('injection:start', { folderPath, mode: 'incremental' });
+    try {
+      const docs = await this.loader.loadDocuments(folderPath);
+      const { added, changed, unchanged, removed } = registry.diff(docs);
+      serverEvents.logEvent('injection:diff', {
+        added: added.length, changed: changed.length, unchanged: unchanged.length, removed: removed.length
+      });
+
+      // 1. Deletions: drop chunks for files no longer present.
+      for (const docId of removed) {
+        await this.store.deleteByDocId(docId);
+        registry.remove(docId);
+      }
+
+      // 2. Additions + changes: re-index only the delta.
+      //    For changed docs, delete old chunks FIRST so that when a file
+      //    shrinks (fewer chunks than before) no orphan chunks survive.
+      const changedIds = new Set(changed.map(d => d.id));
+      let chunksStored = 0;
+      for (const doc of [...added, ...changed]) {
+        if (changedIds.has(doc.id)) await this.store.deleteByDocId(doc.id);
+        const n = await this._indexDoc(doc);
+        registry.set(doc.id, {
+          hash: doc._hash,
+          size: doc.metadata.size,
+          mtime: doc.metadata.mtime,
+          chunkCount: n,
+          lastIndexedAt: Date.now()
+        });
+        chunksStored += n;
+      }
+
+      const duration = Date.now() - start;
+      const result = {
+        success: true, mode: 'incremental',
+        added: added.length, changed: changed.length,
+        unchanged: unchanged.length, removed: removed.length,
+        chunksStored, duration: `${duration}ms`
+      };
+      serverEvents.logEvent('injection:complete', result);
+      return result;
+    } catch (err) {
+      serverEvents.logEvent('error', { stage: 'injection-incremental', message: err.message });
+      return { success: false, error: err.message, duration: `${Date.now() - start}ms` };
+    }
+  }
 }
 
 class ConcreteRetrievalPipeline extends RetrievalPipeline {
@@ -430,12 +564,14 @@ class RAGServer {
     this.retrievalPipeline = null;
     this.inference = null;
     this.store = null;
+    this.registry = null;
     this.server = null;
     this.wsServer = null;
     this.clients = new Set();
   }
 
   async initialize() {
+    this.registry = new DocRegistry();
     if (this.isReal) {
       const embedder = new GeminiEmbedder();
       const store = new ChromaVectorStore();
@@ -491,12 +627,20 @@ class RAGServer {
         ws.send(JSON.stringify({ type: 'stats', data: stats }));
         break;
       case 'request:inject':
-        // Clear + inject from INPUT_DIR
+        // Full rebuild: clear + inject from INPUT_DIR. Registry is reset so it
+        // never points at chunks the clear just removed.
         const injectResult = await this.injectionPipeline.run(INPUT_DIR);
+        this._resetRegistry();
         ws.send(JSON.stringify({ type: 'inject:result', data: injectResult }));
+        break;
+      case 'request:inject-incremental':
+        // Differential sync: only re-embed added/changed files, drop removed.
+        const incResult = await this.injectionPipeline.runIncremental(INPUT_DIR, this.registry);
+        ws.send(JSON.stringify({ type: 'inject:result', data: incResult }));
         break;
       case 'request:clear':  // legacy direct clear (still works)
         await this.store.clear();
+        this._resetRegistry();
         ws.send(JSON.stringify({ type: 'clear:result', data: { success: true } }));
         break;
       case 'request:retrieve':
@@ -584,8 +728,19 @@ class RAGServer {
       req.on('close', () => { serverEvents.removeListener('event', listener); serverEvents.incrementConnectedClients(-1); res.end(); });
     }
     else if (url === '/inject' && req.method === 'POST') {
-      // Clear + inject from INPUT_DIR
+      // Full rebuild: clear + inject from INPUT_DIR (reset registry to match).
       this.injectionPipeline.run(INPUT_DIR).then(result => {
+        this._resetRegistry();
+        res.writeHead(200);
+        res.end(JSON.stringify(result, null, 2));
+      }).catch(err => {
+        res.writeHead(500);
+        res.end(JSON.stringify({ error: err.message }));
+      });
+    }
+    else if (url === '/inject-incremental' && req.method === 'POST') {
+      // Differential sync: only re-embed the delta vs the registry.
+      this.injectionPipeline.runIncremental(INPUT_DIR, this.registry).then(result => {
         res.writeHead(200);
         res.end(JSON.stringify(result, null, 2));
       }).catch(err => {
@@ -594,7 +749,7 @@ class RAGServer {
       });
     }
     else if (url === '/clear' && req.method === 'POST') {
-      this.store.clear().then(() => res.end(JSON.stringify({ success: true }))).catch(e => { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); });
+      this.store.clear().then(() => { this._resetRegistry(); res.end(JSON.stringify({ success: true })); }).catch(e => { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); });
     }
     else if (url === '/retrieve' && req.method === 'POST') {
       let body = '';
@@ -650,6 +805,14 @@ class RAGServer {
     });
   }
   stop() { if (this.server) this.server.close(); }
+
+  // After a full clear/inject the store no longer matches the registry, so wipe
+  // it. The next incremental run then treats every file as newly added.
+  _resetRegistry() {
+    if (!this.registry) return;
+    this.registry.docs = {};
+    this.registry._save();
+  }
 }
 
 
@@ -715,12 +878,76 @@ async function setupRealTests() {
 }
 
 // ============================================================================
+// DELTA (INCREMENTAL SYNC) TESTS — self-contained, no external services
+// ============================================================================
+async function runDeltaTests() {
+  const assert = (cond, msg) => {
+    if (!cond) { console.error(`  ✗ ${msg}`); throw new Error(`FAIL: ${msg}`); }
+    console.log(`  ✓ ${msg}`);
+  };
+  const os = require('os');
+  const tmpRegistry = path.join(os.tmpdir(), `rag-delta-${process.pid}.json`);
+  if (fs.existsSync(tmpRegistry)) fs.unlinkSync(tmpRegistry);
+
+  const registry = new DocRegistry(tmpRegistry);
+  const store = new MockVectorStore();
+  const embedder = new MockEmbedder();
+
+  // Loader whose returned documents we can mutate between runs.
+  let currentDocs = [];
+  const loader = new (class extends DocumentLoader {
+    async loadDocuments() {
+      return currentDocs.map(d => ({
+        id: d.id, content: d.content,
+        metadata: { file: d.id, path: d.id, size: d.content.length, mtime: 0 }
+      }));
+    }
+  })();
+  const pipeline = new ConcreteInjectionPipeline(loader, embedder, store);
+  const countChunks = (docId) => [...store.docs.values()].filter(v => v.metadata.original_id === docId).length;
+
+  console.log('\n[delta] Round 1: index a large doc (multiple chunks)');
+  currentDocs = [{ id: 'doc1.md', content: 'A'.repeat(2500) }]; // > CHUNK_SIZE => several chunks
+  await pipeline.runIncremental('/x', registry);
+  const initialChunks = countChunks('doc1.md');
+  assert(initialChunks >= 3, `large doc split into ${initialChunks} chunks (expected >= 3)`);
+  assert(registry.get('doc1.md').chunkCount === initialChunks, 'registry records the chunk count');
+
+  console.log('\n[delta] Round 2: re-run with no changes (should skip embedding)');
+  const callsBefore = embedder.getCallCount();
+  const r2 = await pipeline.runIncremental('/x', registry);
+  assert(embedder.getCallCount() === callsBefore, 'unchanged doc triggered zero new embeddings');
+  assert(r2.unchanged === 1 && r2.changed === 0 && r2.added === 0, 'diff classified the doc as unchanged');
+  assert(countChunks('doc1.md') === initialChunks, 'chunk count unchanged');
+
+  console.log('\n[delta] Round 3: file shrinks — orphan chunks must be removed');
+  currentDocs = [{ id: 'doc1.md', content: 'tiny content' }]; // single chunk now
+  const r3 = await pipeline.runIncremental('/x', registry);
+  assert(r3.changed === 1, 'diff classified the doc as changed');
+  assert(countChunks('doc1.md') === 1, `shrunk doc has exactly 1 chunk, ${initialChunks - 1} orphans removed`);
+
+  console.log('\n[delta] Round 4: file removed — chunks and registry entry deleted');
+  currentDocs = [];
+  const r4 = await pipeline.runIncremental('/x', registry);
+  assert(r4.removed === 1, 'diff classified the doc as removed');
+  assert(countChunks('doc1.md') === 0, 'removed doc has no surviving chunks');
+  assert(store.docs.size === 0, 'store is empty after removal');
+  assert(registry.get('doc1.md') === undefined, 'registry entry deleted');
+
+  fs.unlinkSync(tmpRegistry);
+  console.log('\n✅ All delta tests passed\n');
+}
+
+// ============================================================================
 // MAIN
 // ============================================================================
 
 async function main() {
   const args = process.argv.slice(2);
-  if (args.includes('--test')) {
+  if (args.includes('--delta-test')) {
+    try { await runDeltaTests(); process.exit(0); }
+    catch (e) { console.error('\n❌ Delta tests failed:', e.message); process.exit(1); }
+  } else if (args.includes('--test')) {
     const runner = await setupTests();
     const ok = await runner.run();
     process.exit(ok ? 0 : 1);
@@ -744,6 +971,7 @@ async function main() {
 
 Usage:
   node rag-server.js --test               Run mock tests
+  node rag-server.js --delta-test         Run incremental-sync (delta) tests
   node rag-server.js --real-test          Run real integration tests
   node rag-server.js --server             Start mock server (port 3000)
   node rag-server.js --server --real      Start real server (Gemini+Chroma+Novita)
@@ -761,4 +989,4 @@ Environment variables:
 
 if (require.main === module) main().catch(e => { console.error(e); process.exit(1); });
 
-module.exports = { RAGServer, serverEvents, ConversationStore, chunkText };
+module.exports = { RAGServer, serverEvents, ConversationStore, DocRegistry, chunkText };

@@ -48,6 +48,7 @@ build/
 .docker/
 docker-compose.override.yml
 data/mcp_evolution_log.json
+data/doc-registry.json
 upgrade/dashboard.html
 upgrade/package.json
 upgrade/rag-server-ws.js
