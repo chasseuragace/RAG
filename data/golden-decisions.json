@@ -1,0 +1,130 @@
+[
+  {
+    "id": "high-quality-balanced",
+    "description": "High quality and completeness — should answer immediately",
+    "assessment": {
+      "quality": 0.82,
+      "completeness": 0.90,
+      "consistency": 0.75,
+      "sourceDiversity": 3,
+      "missingEvidence": { "missingConcepts": [], "ambiguousTerms": [], "conflictingEvidence": [], "unsupportedClaims": [] }
+    },
+    "goal": { "objective": "BALANCED", "maxIterations": 2, "minimumQuality": 0.5, "latencyBudget": 5000 },
+    "traceActions": [],
+    "expectedAction": "answer",
+    "tags": ["high-quality", "balanced"],
+    "createdAt": 1753228800000
+  },
+  {
+    "id": "zero-results-empty-corpus",
+    "description": "No documents retrieved — corpus is empty or query has no match",
+    "assessment": {
+      "quality": 0.0,
+      "completeness": 0.0,
+      "consistency": 1.0,
+      "sourceDiversity": 0,
+      "missingEvidence": { "missingConcepts": ["no_retrieved_documents"], "ambiguousTerms": [], "conflictingEvidence": [], "unsupportedClaims": [] }
+    },
+    "goal": { "objective": "BALANCED", "maxIterations": 2, "minimumQuality": 0.5, "latencyBudget": 5000 },
+    "traceActions": ["increase_topk"],
+    "expectedAction": "stop",
+    "tags": ["empty-corpus"],
+    "createdAt": 1753228800000
+  },
+  {
+    "id": "low-quality-no-prior-actions",
+    "description": "Low relevance on first iteration — should expand retrieval set",
+    "assessment": {
+      "quality": 0.18,
+      "completeness": 0.30,
+      "consistency": 0.80,
+      "sourceDiversity": 1,
+      "missingEvidence": { "missingConcepts": ["low_relevance_top_result"], "ambiguousTerms": [], "conflictingEvidence": [], "unsupportedClaims": [] }
+    },
+    "goal": { "objective": "BALANCED", "maxIterations": 2, "minimumQuality": 0.5, "latencyBudget": 5000 },
+    "traceActions": [],
+    "expectedAction": "increase_topk",
+    "tags": ["low-quality"],
+    "createdAt": 1753228800000
+  },
+  {
+    "id": "low-coverage-single-source",
+    "description": "Partial quality but only one source — should rewrite query",
+    "assessment": {
+      "quality": 0.45,
+      "completeness": 0.25,
+      "consistency": 0.90,
+      "sourceDiversity": 1,
+      "missingEvidence": { "missingConcepts": ["only_1_source_available", "uncovered_query_terms: neural, networks"], "ambiguousTerms": [], "conflictingEvidence": [], "unsupportedClaims": [] }
+    },
+    "goal": { "objective": "BALANCED", "maxIterations": 2, "minimumQuality": 0.5, "latencyBudget": 5000 },
+    "traceActions": [],
+    "expectedAction": "rewrite_query",
+    "tags": ["low-coverage"],
+    "createdAt": 1753228800000
+  },
+  {
+    "id": "medium-quality-multi-source",
+    "description": "Several sources but incomplete coverage — increase topk to consolidate",
+    "assessment": {
+      "quality": 0.55,
+      "completeness": 0.40,
+      "consistency": 0.65,
+      "sourceDiversity": 3,
+      "missingEvidence": { "missingConcepts": ["uncovered_query_terms: transformer"], "ambiguousTerms": [], "conflictingEvidence": [], "unsupportedClaims": [] }
+    },
+    "goal": { "objective": "BALANCED", "maxIterations": 2, "minimumQuality": 0.5, "latencyBudget": 5000 },
+    "traceActions": [],
+    "expectedAction": "increase_topk",
+    "tags": ["medium-quality"],
+    "createdAt": 1753228800000
+  },
+  {
+    "id": "good-quality-after-rewrite",
+    "description": "Quality improved after a query rewrite — now sufficient to answer",
+    "assessment": {
+      "quality": 0.72,
+      "completeness": 0.85,
+      "consistency": 0.70,
+      "sourceDiversity": 2,
+      "missingEvidence": { "missingConcepts": [], "ambiguousTerms": [], "conflictingEvidence": [], "unsupportedClaims": [] }
+    },
+    "goal": { "objective": "BALANCED", "maxIterations": 2, "minimumQuality": 0.5, "latencyBudget": 5000 },
+    "traceActions": ["rewrite_query"],
+    "expectedAction": "answer",
+    "tags": ["high-quality", "post-rewrite"],
+    "createdAt": 1753228800000
+  },
+  {
+    "id": "max-recall-high-threshold",
+    "description": "MAXIMIZE_RECALL objective — answer only when quality is very high",
+    "assessment": {
+      "quality": 0.60,
+      "completeness": 0.65,
+      "consistency": 0.72,
+      "sourceDiversity": 2,
+      "missingEvidence": { "missingConcepts": [], "ambiguousTerms": [], "conflictingEvidence": [], "unsupportedClaims": [] }
+    },
+    "goal": { "objective": "MAXIMIZE_RECALL", "maxIterations": 3, "minimumQuality": 0.7, "latencyBudget": 8000 },
+    "traceActions": [],
+    "expectedAction": "increase_topk",
+    "tags": ["maximize-recall"],
+    "createdAt": 1753228800000
+  },
+  {
+    "id": "exhausted-iterations-stop",
+    "description": "Already tried increase_topk twice — further retrieval unlikely to help",
+    "assessment": {
+      "quality": 0.22,
+      "completeness": 0.20,
+      "consistency": 0.85,
+      "sourceDiversity": 1,
+      "missingEvidence": { "missingConcepts": ["low_relevance_top_result", "no_retrieved_documents"], "ambiguousTerms": [], "conflictingEvidence": [], "unsupportedClaims": [] }
+    },
+    "goal": { "objective": "BALANCED", "maxIterations": 2, "minimumQuality": 0.5, "latencyBudget": 5000 },
+    "traceActions": ["increase_topk", "increase_topk"],
+    "expectedAction": "stop",
+    "tags": ["exhausted", "low-quality"],
+    "createdAt": 1753228800000
+  }
+]

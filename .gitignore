@@ -23,6 +23,10 @@ Thumbs.db
 conversations/
 data/
 
+# Golden dataset and docs are source-controlled eval artifacts
+!data/golden-decisions.json
+!data/GOLDEN_DATASET_README.md
+
 # Logs
 logs/
 *.log

@@ -51,6 +51,7 @@ Observation'  (updated with Trace)
 | 1 | Assessment + Trace + Goal (RetrievalAssessment, Decision, Coordinator, Policy) | ✅ |
 | 2 | Hypothesis-driven Actions (rationale + evidence on every Decision, trace preservation) | ✅ |
 | 3 | Additional Policies (AggressiveRetrievalPolicy, LowLatencyPolicy, BalancedPolicy) | ✅ |
+| 5 | LLM-backed Strategy (LLMPolicy, GoldenDataset, ReplayHarness) | ✅ |
 
 ---
 
