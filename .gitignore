@@ -19,6 +19,10 @@ yarn.lock
 .DS_Store
 Thumbs.db
 
+# Runtime artifacts
+conversations/
+data/
+
 # Logs
 logs/
 *.log
