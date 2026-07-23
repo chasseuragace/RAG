@@ -7,9 +7,17 @@ const { MockReranker } = require('../src/rerankers/mock');
 const { AgenticRetrievalPipeline } = require('../src/pipelines/agentic-retrieval');
 const { HeuristicRetrievalStrategy } = require('../src/agentic/strategies/heuristic');
 const { StubRetrievalStrategy } = require('../src/agentic/strategies/stub');
-const { ConstrainedPlanner } = require('../src/agentic/planner');
+const { RetrievalAssessment } = require('../src/agentic/assessment');
+const { Decision } = require('../src/agentic/decision');
+const { Trace } = require('../src/agentic/trace');
+const { TraceEvent } = require('../src/agentic/trace');
+const { Coordinator } = require('../src/agentic/coordinator');
+const { RetrievalPolicy } = require('../src/agentic/policy');
+const { HeuristicRetrievalPolicy } = require('../src/agentic/policies/heuristic');
 const { RetrievalJudge } = require('../src/agentic/judge');
 const { Observation } = require('../src/agentic/observation');
+const { RetrievalExecutor } = require('../src/agentic/executor');
+const { RetrievalObjectives } = require('../src/core/interfaces');
 
 function cosine(a, b) {
   let dot = 0, na = 0, nb = 0;
@@ -124,89 +132,117 @@ async function setupTests() {
     await a.assertTrue(reranked[0].rerankReason.includes('overlap'));
   });
 
-  runner.test('ConstrainedPlanner decides actions based on evidence state', async (a) => {
-    const planner = new ConstrainedPlanner({ minResultsForAnswer: 2, lowScoreThreshold: 0.3, mediumScoreThreshold: 0.5 });
+  runner.test('HeuristicRetrievalPolicy decides actions from assessment and goal', async (a) => {
+    const policy = new HeuristicRetrievalPolicy();
 
-    const noResults = await planner.decide({ query: 'test', results: [], rerankedResults: [], previousActions: [{ type: 'search' }], topScore: 0, iteration: 1 });
-    await a.assertEqual(noResults.type, 'stop');
+    const goodAssessment = RetrievalAssessment.create(0.8, 0.8, 0.7, 2, { missingConcepts: [], ambiguousTerms: [], conflictingEvidence: [], unsupportedClaims: [] });
+    const goodDecision = policy.resolve(goodAssessment, { objective: RetrievalObjectives.BALANCED, maxIterations: 2, minimumQuality: 0.5 }, new Trace());
+    await a.assertEqual(goodDecision.action, 'answer');
+    await a.assertTrue(goodDecision.rationale.includes('sufficient_evidence'));
 
-    const lowScore = await planner.decide({ query: 'test', results: [{ score: 0.2 }], rerankedResults: [{ score: 0.2 }], previousActions: [], topScore: 0.2 });
-    await a.assertEqual(lowScore.type, 'increase_topk');
+    const lowQuality = RetrievalAssessment.create(0.2, 0.4, 0.5, 0, { missingConcepts: ['low_relevance_top_result'], ambiguousTerms: [], conflictingEvidence: [], unsupportedClaims: [] });
+    const lowDecision = policy.resolve(lowQuality, { objective: RetrievalObjectives.BALANCED, maxIterations: 2, minimumQuality: 0.5 }, new Trace());
+    await a.assertEqual(lowDecision.action, 'increase_topk');
+    await a.assertTrue(lowDecision.evidence.threshold !== undefined);
 
-    const sufficient = await planner.decide({ query: 'test', results: [{ score: 0.8 }, { score: 0.6 }], rerankedResults: [{ score: 0.8 }, { score: 0.6 }], previousActions: [], topScore: 0.8 });
-    await a.assertEqual(sufficient.type, 'answer');
+    const lowCoverage = RetrievalAssessment.create(0.5, 0.2, 0.6, 1, { missingConcepts: ['only_1_source_available'], ambiguousTerms: [], conflictingEvidence: [], unsupportedClaims: [] });
+    const coverageDecision = policy.resolve(lowCoverage, { objective: RetrievalObjectives.BALANCED, maxIterations: 2, minimumQuality: 0.5 }, new Trace());
+    await a.assertEqual(coverageDecision.action, 'rewrite_query');
+    await a.assertTrue(coverageDecision.rationale.includes('Coverage appears low'));
   });
 
-  runner.test('RetrievalJudge evaluates evidence without hallucinating', async (a) => {
-    const judge = new RetrievalJudge({ sufficientThreshold: 0.6, minDocsForSufficiency: 2 });
-
-    const empty = await judge.evaluate({ query: 'deep learning', results: [], rerankedResults: [] });
-    await a.assertTrue(!empty.sufficient);
-    await a.assertTrue(empty.missing.includes('no_retrieved_documents'));
-
-    const partial = await judge.evaluate({ query: 'deep learning', results: [{ score: 0.9, metadata: { content: 'deep learning neural networks' } }], rerankedResults: [{ score: 0.9, metadata: { content: 'deep learning neural networks' } }] });
-    await a.assertTrue(!partial.sufficient);
-    await a.assertTrue(partial.missing.includes('only_1_document_found'));
-
-    const good = await judge.evaluate({ query: 'deep learning', results: [{ score: 0.8 }, { score: 0.6 }], rerankedResults: [{ score: 0.8 }, { score: 0.6 }] });
-    await a.assertTrue(good.sufficient);
-    await a.assertTrue(good.quality > 0.6);
+  runner.test('RetrievalAssessment is purely descriptive', async (a) => {
+    const assessment = RetrievalAssessment.create(0.7, 0.6, 0.8, 2, { missingConcepts: ['term_x'], ambiguousTerms: [], conflictingEvidence: [], unsupportedClaims: [] });
+    await a.assertEqual(assessment.quality, 0.7);
+    await a.assertEqual(assessment.completeness, 0.6);
+    await a.assertEqual(assessment.consistency, 0.8);
+    await a.assertEqual(assessment.sourceDiversity, 2);
+    await a.assertTrue(Array.isArray(assessment.missingEvidence.missingConcepts));
+    await a.assertTrue(!assessment.recommendation, 'assessment has no recommendation field');
   });
 
-  runner.test('AgenticRetrievalPipeline answers immediately when strategy returns finalAction', async (a) => {
+  runner.test('Trace accumulates events across iterations', async (a) => {
+    const trace = new Trace();
+    trace.add(new TraceEvent({ timestamp: 1000, iteration: 0, phase: 'judge', assessment: RetrievalAssessment.create(0.5, 0.5, 0.5, 1) }));
+    trace.add(new TraceEvent({ timestamp: 1100, iteration: 0, phase: 'policy', decision: Decision.create('increase_topk', 'low recall') }));
+    await a.assertEqual(trace.events.length, 2);
+    await a.assertEqual(trace.events[0].phase, 'judge');
+    await a.assertEqual(trace.events[1].decision.action, 'increase_topk');
+    const serialized = trace.toArray();
+    await a.assertEqual(serialized[1].decision.type, 'increase_topk');
+  });
+
+  runner.test('Coordinator respects maxIterations and latencyBudget', async (a) => {
+    const judge = new RetrievalJudge({ sufficientThreshold: 0.9, minDocsForSufficiency: 2 });
+    const policy = new HeuristicRetrievalPolicy({ mediumScoreThreshold: 0.9 });
+    const e = new MockEmbedder();
+    const v = new MockVectorStore();
+    const b = new BM25Store();
+    const h = new HybridStore(v, b);
+    for (const [id, text, content] of [['dl1', 'deep learning neural networks', 'deep learning neural networks']]) {
+      h.store(id, e.embed(text), { original_id: id, content });
+    }
+    const executor = new RetrievalExecutor(e, h, new MockReranker());
+    const coordinator = new Coordinator(judge, policy, executor);
+    const observation = Observation.create('deep learning', 2, { objective: RetrievalObjectives.BALANCED, maxIterations: 2, minimumQuality: 0.9, latencyBudget: 1000 });
+    const result = await coordinator.run(observation, { objective: RetrievalObjectives.BALANCED, maxIterations: 2, minimumQuality: 0.9, latencyBudget: 1000 });
+    await a.assertTrue(result.trace.events.length > 0, 'records trace events');
+    await a.assertTrue(result.finalAction && result.finalAction.type, 'produces finalAction');
+  });
+
+  runner.test('AgenticRetrievalPipeline returns assessment, decision, trace and goal', async (a) => {
+    const e = new MockEmbedder();
+    const h = setupStore(e);
+    const reranker = new MockReranker();
+    const pipeline = new AgenticRetrievalPipeline(e, h, reranker, {
+      objective: RetrievalObjectives.BALANCED,
+      latencyBudget: 5000,
+      maxIterations: 2,
+      minimumQuality: 0.5
+    });
+    const result = await pipeline.run('deep learning', 2);
+    await a.assertTrue(result.success);
+    await a.assertTrue(result.assessment !== null, 'assessment is present');
+    await a.assertTrue(result.decision !== null, 'decision is present');
+    await a.assertTrue(Array.isArray(result.trace), 'trace is array');
+    await a.assertTrue(result.trace.length > 0, 'trace has events');
+    await a.assertEqual(result.goal.objective, RetrievalObjectives.BALANCED);
+    await a.assertTrue(result.finalAction && result.finalAction.type, 'finalAction is set');
+  });
+
+  runner.test('AgenticRetrievalPipeline answers immediately with stub strategy', async (a) => {
     const e = new MockEmbedder();
     const h = setupStore(e);
     const reranker = new MockReranker();
     const strategy = new StubRetrievalStrategy([
-      { finalAction: { type: 'answer', reason: 'sufficient_evidence: 2 docs, topScore=0.85' }, retrievalQuality: 0.85, missingEvidence: [], rerankedResults: [
-        { id: 'dl1', score: 0.85, metadata: { content: 'deep learning neural networks explained', original_id: 'dl1' }, rerankReason: 'overlap=2,factor=1.00' },
-        { id: 'dl2', score: 0.72, metadata: { content: 'machine learning algorithms and models', original_id: 'dl2' }, rerankReason: 'overlap=1,factor=0.50' },
-      ], steps: [{ type: 'search', query: 'deep learning', resultCount: 2, reason: 'init' }] },
+      { finalAction: Decision.create('answer', 'sufficient_evidence', { quality: 0.9, completeness: 0.8, sourceDiversity: 2 }), assessment: RetrievalAssessment.create(0.9, 0.8, 0.7, 2), rerankedResults: [
+        { id: 'dl1', score: 0.9, metadata: { content: 'deep learning neural networks explained', original_id: 'dl1' }, rerankReason: 'overlap=2,factor=1.00' },
+        { id: 'dl2', score: 0.8, metadata: { content: 'machine learning algorithms and models', original_id: 'dl2' }, rerankReason: 'overlap=1,factor=0.50' },
+      ] },
     ]);
-    const pipeline = new AgenticRetrievalPipeline(e, h, reranker, strategy, 4);
+    const pipeline = new AgenticRetrievalPipeline(e, h, reranker, strategy, 2);
     const result = await pipeline.run('deep learning', 2);
     await a.assertTrue(result.success);
     await a.assertEqual(result.finalAction.type, 'answer');
-    await a.assertEqual(result.finalAction.reason, 'sufficient_evidence: 2 docs, topScore=0.85');
-    await a.assertTrue(result.retrievalQuality, 0.85);
-    await a.assertEqual(result.resultsCount, 2, 'returns results from strategy');
-    await a.assertEqual(result.steps.length, 1, 'records the single search step');
+    await a.assertEqual(result.decision.action, 'answer');
+    await a.assertEqual(result.decision.rationale, 'sufficient_evidence');
+    await a.assertEqual(result.assessment.quality, 0.9);
+    await a.assertEqual(result.resultsCount, 2);
   });
 
-  runner.test('AgenticRetrievalPipeline stops when strategy returns stop action', async (a) => {
+  runner.test('AgenticRetrievalPipeline stops with explicit decision from stub strategy', async (a) => {
     const e = new MockEmbedder();
     const h = setupStore(e);
     const reranker = new MockReranker();
     const strategy = new StubRetrievalStrategy([
-      { finalAction: { type: 'stop', reason: 'no_results_after_retrieval' }, retrievalQuality: 0, missingEvidence: ['no_retrieved_documents'], steps: [] },
+      { finalAction: Decision.create('stop', 'no_results_after_retrieval', { reason: 'empty corpus' }), assessment: RetrievalAssessment.create(0, 0, 0, 0, { missingConcepts: ['no_retrieved_documents'], ambiguousTerms: [], conflictingEvidence: [], unsupportedClaims: [] }) },
     ]);
-    const pipeline = new AgenticRetrievalPipeline(e, h, reranker, strategy, 4);
-    const result = await pipeline.run('unknown topic xyz', 2);
+    const pipeline = new AgenticRetrievalPipeline(e, h, reranker, strategy, 2);
+    const result = await pipeline.run('unknown', 2);
     await a.assertTrue(result.success);
     await a.assertEqual(result.finalAction.type, 'stop');
-    await a.assertEqual(result.finalAction.reason, 'no_results_after_retrieval');
-    await a.assertTrue(Array.isArray(result.missingEvidence));
-  });
-
-  runner.test('AgenticRetrievalPipeline records multi-step actions from strategy', async (a) => {
-    const e = new MockEmbedder();
-    const h = setupStore(e);
-    const reranker = new MockReranker();
-    const strategy = new StubRetrievalStrategy([
-      { steps: [{ type: 'search', reason: 'initial retrieval' }] },
-      { steps: [{ type: 'increase_topk', reason: 'low relevance' }] },
-      { steps: [{ type: 'search', reason: 'expanded recall' }] },
-      { finalAction: { type: 'answer', reason: 'sufficient_evidence' }, retrievalQuality: 0.75, missingEvidence: [] },
-    ]);
-    const pipeline = new AgenticRetrievalPipeline(e, h, reranker, strategy, 4);
-    const result = await pipeline.run('deep learning', 2);
-    await a.assertTrue(result.success);
-    await a.assertEqual(result.finalAction.type, 'answer');
-    await a.assertTrue(result.steps.length >= 3, 'records multiple action steps');
-    const actionTypes = result.steps.map(s => s.type);
-    await a.assertTrue(actionTypes.includes('search'), 'includes search action');
-    await a.assertTrue(actionTypes.includes('increase_topk'), 'includes increase_topk action');
-    await a.assertTrue(result.steps.some(s => s.reason), 'each step has a reason');
+    await a.assertEqual(result.decision.rationale, 'no_results_after_retrieval');
+    await a.assertTrue(Array.isArray(result.trace));
   });
 
   runner.test('AgenticRetrievalPipeline handles empty corpus gracefully', async (a) => {
@@ -215,11 +251,15 @@ async function setupTests() {
     const b = new BM25Store();
     const h = new HybridStore(v, b);
     const reranker = new MockReranker();
-    const strategy = new HeuristicRetrievalStrategy(e, h, reranker);
-    const pipeline = new AgenticRetrievalPipeline(e, h, reranker, strategy, 2);
+    const pipeline = new AgenticRetrievalPipeline(e, h, reranker, {
+      objective: RetrievalObjectives.BALANCED,
+      latencyBudget: 1000,
+      maxIterations: 1,
+      minimumQuality: 0.5
+    });
     const result = await pipeline.run('deep learning', 2);
     await a.assertTrue(result.success, 'does not throw on empty corpus');
-    await a.assertTrue(result.steps.length > 0, 'records at least one step');
+    await a.assertTrue(result.trace.length > 0, 'records trace events');
     await a.assertTrue(result.finalAction && result.finalAction.type === 'stop', 'stops on empty corpus');
   });
 
@@ -227,16 +267,14 @@ async function setupTests() {
     const e = new MockEmbedder();
     const h1 = setupStore(e);
     const reranker = new MockReranker();
-    const strategy1 = new HeuristicRetrievalStrategy(e, h1, reranker);
-    const pipeline1 = new AgenticRetrievalPipeline(e, h1, reranker, strategy1, 2);
+    const pipeline1 = new AgenticRetrievalPipeline(e, h1, reranker, { objective: RetrievalObjectives.BALANCED, maxIterations: 2, minimumQuality: 0.5, latencyBudget: 5000 });
     const r1 = await pipeline1.run('deep learning', 2);
 
     const h2 = setupStore(e);
-    const strategy2 = new HeuristicRetrievalStrategy(e, h2, reranker);
-    const pipeline2 = new AgenticRetrievalPipeline(e, h2, reranker, strategy2, 2);
+    const pipeline2 = new AgenticRetrievalPipeline(e, h2, reranker, { objective: RetrievalObjectives.BALANCED, maxIterations: 2, minimumQuality: 0.5, latencyBudget: 5000 });
     const r2 = await pipeline2.run('deep learning', 2);
 
-    await a.assertEqual(r1.steps.length, r2.steps.length);
+    await a.assertEqual(r1.trace.length, r2.trace.length);
     await a.assertEqual(r1.finalAction.type, r2.finalAction.type);
     await a.assertEqual(r1.resultsCount, r2.resultsCount);
   });
@@ -262,17 +300,6 @@ async function setupTests() {
     const r2 = await h.search(await e.embed('alpha'), 'alpha', 1);
     await a.assertEqual(r1[0].id, r2[0].id);
     await a.assertEqual(r1[0].score, r2[0].score);
-  });
-
-  runner.test('HeuristicRetrievalStrategy returns explicit finalAction and quality', async (a) => {
-    const e = new MockEmbedder();
-    const h = setupStore(e);
-    const reranker = new MockReranker();
-    const strategy = new HeuristicRetrievalStrategy(e, h, reranker, { sufficientThreshold: 0.15, minDocsForAnswer: 1, minDocsForSufficiency: 1 });
-    const obs = await strategy.run(Observation.create('deep learning', 2), 2);
-    await a.assertTrue(obs.finalAction && obs.finalAction.type, 'finalAction is set');
-    await a.assertTrue(typeof obs.retrievalQuality === 'number', 'retrievalQuality is numeric');
-    await a.assertTrue(Array.isArray(obs.missingEvidence), 'missingEvidence is array');
   });
 
   return runner;

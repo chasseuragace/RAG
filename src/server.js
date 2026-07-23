@@ -26,6 +26,7 @@ const { ConcreteInjectionPipeline } = require('./pipelines/injection');
 const { ConcreteRetrievalPipeline, HybridRetrievalPipeline } = require('./pipelines/retrieval');
 const { AgenticRetrievalPipeline } = require('./pipelines/agentic-retrieval');
 const { HeuristicRetrievalStrategy } = require('./agentic/strategies/heuristic');
+const { RetrievalObjectives } = require('./core/interfaces');
 
 // public/ lives at the project root, one level above src/
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
@@ -70,8 +71,12 @@ class RAGServer {
       this.inference = new NovitaInference();
       this.injectionPipeline = new ConcreteInjectionPipeline(loader, embedder, hybrid);
       this.retrievalPipeline = new HybridRetrievalPipeline(embedder, hybrid);
-      const strategy = new HeuristicRetrievalStrategy(embedder, hybrid, reranker);
-      this.agenticPipeline = new AgenticRetrievalPipeline(embedder, hybrid, reranker, strategy);
+      this.agenticPipeline = new AgenticRetrievalPipeline(embedder, hybrid, reranker, {
+        objective: RetrievalObjectives.BALANCED,
+        latencyBudget: 5000,
+        maxIterations: 2,
+        minimumQuality: 0.5
+      });
       this.store = hybrid;
       this.hybridStore = hybrid;
       this.bm25Store = bm25;
@@ -86,8 +91,12 @@ class RAGServer {
       this.inference = new MockInference();
       this.injectionPipeline = new ConcreteInjectionPipeline(loader, embedder, hybrid);
       this.retrievalPipeline = new HybridRetrievalPipeline(embedder, hybrid);
-      const strategy = new HeuristicRetrievalStrategy(embedder, hybrid, reranker);
-      this.agenticPipeline = new AgenticRetrievalPipeline(embedder, hybrid, reranker, strategy);
+      this.agenticPipeline = new AgenticRetrievalPipeline(embedder, hybrid, reranker, {
+        objective: RetrievalObjectives.BALANCED,
+        latencyBudget: 5000,
+        maxIterations: 2,
+        minimumQuality: 0.5
+      });
       this.store = hybrid;
       this.hybridStore = hybrid;
       this.bm25Store = bm25;
@@ -164,7 +173,7 @@ class RAGServer {
         conv.addMessage('assistant', answer);
         ws.send(JSON.stringify({
           type: 'ask:result',
-          data: { success: true, query: payload.query, answer, sources: agenticResult.results, sessionId, steps: agenticResult.steps, retrievalQuality: agenticResult.retrievalQuality, missingEvidence: agenticResult.missingEvidence, finalAction: agenticResult.finalAction }
+          data: { success: true, query: payload.query, answer, sources: agenticResult.results, sessionId, assessment: agenticResult.assessment, decision: agenticResult.decision, finalAction: agenticResult.finalAction, trace: agenticResult.trace, goal: agenticResult.goal }
         }));
         break;
       case 'ping':
@@ -280,7 +289,7 @@ class RAGServer {
           conv.addMessage('user', query);
           conv.addMessage('assistant', answer);
           res.writeHead(200);
-          res.end(JSON.stringify({ success: true, query, answer, sources: agenticResult.results, sessionId: sid, steps: agenticResult.steps, retrievalQuality: agenticResult.retrievalQuality, missingEvidence: agenticResult.missingEvidence, finalAction: agenticResult.finalAction }, null, 2));
+          res.end(JSON.stringify({ success: true, query, answer, sources: agenticResult.results, sessionId: sid, assessment: agenticResult.assessment, decision: agenticResult.decision, finalAction: agenticResult.finalAction, trace: agenticResult.trace, goal: agenticResult.goal }, null, 2));
         } catch(e) { res.writeHead(400); res.end(JSON.stringify({ error: e.message })); }
       });
     }
