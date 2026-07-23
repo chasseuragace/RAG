@@ -16,9 +16,16 @@ const { MockEmbedder } = require('./embedders/mock');
 const { GeminiEmbedder } = require('./embedders/gemini');
 const { MockVectorStore } = require('./stores/mock');
 const { ChromaVectorStore } = require('./stores/chroma');
+const { BM25Store } = require('./stores/bm25');
+const { HybridStore } = require('./stores/hybrid');
+const { MockReranker } = require('./rerankers/mock');
+const { CrossEncoderReranker } = require('./rerankers/real');
 const { NovitaInference } = require('./inference/novita');
+const { MockInference } = require('./inference/mock');
 const { ConcreteInjectionPipeline } = require('./pipelines/injection');
-const { ConcreteRetrievalPipeline } = require('./pipelines/retrieval');
+const { ConcreteRetrievalPipeline, HybridRetrievalPipeline } = require('./pipelines/retrieval');
+const { AgenticRetrievalPipeline } = require('./pipelines/agentic-retrieval');
+const { HeuristicRetrievalStrategy } = require('./agentic/strategies/heuristic');
 
 // public/ lives at the project root, one level above src/
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
@@ -39,8 +46,12 @@ class RAGServer {
     this.isReal = isReal;
     this.injectionPipeline = null;
     this.retrievalPipeline = null;
+    this.agenticPipeline = null;
     this.inference = null;
     this.store = null;
+    this.hybridStore = null;
+    this.bm25Store = null;
+    this.reranker = null;
     this.registry = null;
     this.server = null;
     this.wsServer = null;
@@ -52,20 +63,36 @@ class RAGServer {
     if (this.isReal) {
       const embedder = new GeminiEmbedder();
       const store = new ChromaVectorStore();
+      const bm25 = new BM25Store();
+      const hybrid = new HybridStore(store, bm25);
       const loader = new RealDocumentLoader();
+      const reranker = new CrossEncoderReranker();
       this.inference = new NovitaInference();
-      this.injectionPipeline = new ConcreteInjectionPipeline(loader, embedder, store);
-      this.retrievalPipeline = new ConcreteRetrievalPipeline(embedder, store);
-      this.store = store;
+      this.injectionPipeline = new ConcreteInjectionPipeline(loader, embedder, hybrid);
+      this.retrievalPipeline = new HybridRetrievalPipeline(embedder, hybrid);
+      const strategy = new HeuristicRetrievalStrategy(embedder, hybrid, reranker);
+      this.agenticPipeline = new AgenticRetrievalPipeline(embedder, hybrid, reranker, strategy);
+      this.store = hybrid;
+      this.hybridStore = hybrid;
+      this.bm25Store = bm25;
+      this.reranker = reranker;
     } else {
       const embedder = new MockEmbedder();
       const store = new MockVectorStore();
+      const bm25 = new BM25Store();
+      const hybrid = new HybridStore(store, bm25);
       const loader = new MockDocumentLoader();
-      this.injectionPipeline = new ConcreteInjectionPipeline(loader, embedder, store);
-      this.retrievalPipeline = new ConcreteRetrievalPipeline(embedder, store);
-      // Pre‑inject mock documents (registry populated to match)
+      const reranker = new MockReranker();
+      this.inference = new MockInference();
+      this.injectionPipeline = new ConcreteInjectionPipeline(loader, embedder, hybrid);
+      this.retrievalPipeline = new HybridRetrievalPipeline(embedder, hybrid);
+      const strategy = new HeuristicRetrievalStrategy(embedder, hybrid, reranker);
+      this.agenticPipeline = new AgenticRetrievalPipeline(embedder, hybrid, reranker, strategy);
+      this.store = hybrid;
+      this.hybridStore = hybrid;
+      this.bm25Store = bm25;
+      this.reranker = reranker;
       await this.injectionPipeline.run('/mock', this.registry);
-      this.store = store;
     }
   }
 
@@ -125,22 +152,19 @@ class RAGServer {
         ws.send(JSON.stringify({ type: 'retrieve:result', data: retrieval }));
         break;
       case 'request:ask':
-        // Expect payload: { query, sessionId, topK? }
         const sessionId = payload.sessionId || `anon_${Date.now()}_${Math.random().toString(36).substr(2, 8)}`;
         const conv = ConversationStore.getOrCreate(sessionId);
         const history = conv.getHistory(10);
-        // 1. Retrieve context
-        const retrievalAsk = await this.retrievalPipeline.run(payload.query, payload.topK || 3);
-        if (!retrievalAsk.success) throw new Error(retrievalAsk.error);
-        const contextDocs = retrievalAsk.results.map(r => ({ id: r.id, content: r.metadata.content || '', metadata: r.metadata }));
-        // 2. Generate answer with history
+        const topK = payload.topK || 3;
+        const agenticResult = await this.agenticPipeline.run(payload.query, topK);
+        if (!agenticResult.success) throw new Error(agenticResult.error);
+        const contextDocs = agenticResult.results.map(r => ({ id: r.id, content: r.metadata.content || '', metadata: r.metadata }));
         const answer = await this.inference.generateAnswer(payload.query, contextDocs, history);
-        // 3. Store in history
         conv.addMessage('user', payload.query);
         conv.addMessage('assistant', answer);
         ws.send(JSON.stringify({
           type: 'ask:result',
-          data: { success: true, query: payload.query, answer, sources: retrievalAsk.results, sessionId }
+          data: { success: true, query: payload.query, answer, sources: agenticResult.results, sessionId, steps: agenticResult.steps, retrievalQuality: agenticResult.retrievalQuality, missingEvidence: agenticResult.missingEvidence, finalAction: agenticResult.finalAction }
         }));
         break;
       case 'ping':
@@ -249,17 +273,14 @@ class RAGServer {
           const sid = sessionId || `http_${Date.now()}_${Math.random().toString(36).substr(2, 8)}`;
           const conv = ConversationStore.getOrCreate(sid);
           const history = conv.getHistory(10);
-          // 1. Retrieve
-          const retrieval = await this.retrievalPipeline.run(query, topK);
-          if (!retrieval.success) throw new Error(retrieval.error);
-          const contextDocs = retrieval.results.map(r => ({ id: r.id, content: r.metadata.content || '', metadata: r.metadata }));
-          // 2. Generate
+          const agenticResult = await this.agenticPipeline.run(query, topK);
+          if (!agenticResult.success) throw new Error(agenticResult.error);
+          const contextDocs = agenticResult.results.map(r => ({ id: r.id, content: r.metadata.content || '', metadata: r.metadata }));
           const answer = await this.inference.generateAnswer(query, contextDocs, history);
-          // 3. Save
           conv.addMessage('user', query);
           conv.addMessage('assistant', answer);
           res.writeHead(200);
-          res.end(JSON.stringify({ success: true, query, answer, sources: retrieval.results, sessionId: sid }, null, 2));
+          res.end(JSON.stringify({ success: true, query, answer, sources: agenticResult.results, sessionId: sid, steps: agenticResult.steps, retrievalQuality: agenticResult.retrievalQuality, missingEvidence: agenticResult.missingEvidence, finalAction: agenticResult.finalAction }, null, 2));
         } catch(e) { res.writeHead(400); res.end(JSON.stringify({ error: e.message })); }
       });
     }
