@@ -13,6 +13,9 @@ Designed to be extended by a frontend dashboard: inject documents, monitor progr
 ✅ Incremental sync — hash‑diff, re‑embed only the delta, no retrieval blackout
 ✅ Conversation history (JSON file based)
 ✅ REST API + WebSocket commands
+✅ Hybrid search (vector + BM25 + RRF fusion)
+✅ Reranking (cross‑encoder / mock heuristic)
+✅ Agentic retrieval (Planner–Executor–Judge architecture, bounded iteration, explicit reasoning)
 ```
 
 > **Layout:** the implementation lives under `src/` (config, events, core, loaders,
@@ -47,27 +50,57 @@ Designed to be extended by a frontend dashboard: inject documents, monitor progr
 │                    └────────────────────┘    └──────────────────┘ │
 │       ↑ doc-registry.json = source of truth ↑          ↓          │
 │                                                    ┌────────────┐ │
-│                                                    │ Store in   │ │
-│                                                    │ Chroma     │ │
+│                                                    │ Hybrid     │ │
+│                                                    │ Vector +   │ │
+│                                                    │ BM25 Store │ │
 │                                                    └────────────┘ │
 │                                                                    │
-│  RETRIEVAL + INFERENCE (RAG Chat)                                 │
-│  ┌────────────┐    ┌────────────┐    ┌───────────┐    ┌────────┐ │
-│  │ User Query │ →  │ Embed      │ →  │ Chroma    │ →  │ Context│ │
-│  │ + history  │    │ (Gemini)   │    │ Search    │    │ Chunks │ │
-│  └────────────┘    └────────────┘    └───────────┘    └────────┘ │
-│                                                           ↓        │
-│                                                    ┌────────────┐ │
-│                                                    │ Novita     │ │
-│                                                    │ DeepSeek   │ │
-│                                                    │ Answer     │ │
-│                                                    └────────────┘ │
-│                                                                    │
-│  TELEMETRY (WebSocket / SSE)                                       │
+│  AGENTIC RETRIEVAL (RAG Chat)                                     │
 │  ┌─────────────────────────────────────────────────────────────┐  │
-│  │ Events: injection:start/complete, embedding:complete,      │  │
-│  │ vectorstore:stored/queried, retrieval:complete, error, ... │  │
-│  └─────────────────────────────────────────────────────────────┘  │
+│  │ Observation                                                 │  │
+│  │   { query, results, topScore, previousActions }             │  │
+│  └──────────────────────────┬──────────────────────────────────┘  │
+│                             │                                      │
+│                             ▼                                      │
+│  ┌─────────────────────────────────────────────────────────────┐  │
+│  │ ConstrainedPlanner                                          │  │
+│  │   Finite action space: search | increase_topk |             │  │
+│  │   rewrite_query | answer | stop                             │  │
+│  │   Each action includes explicit reason                       │  │
+│  └──────────────────────────┬──────────────────────────────────┘  │
+│                             │                                      │
+│                             ▼                                      │
+│  ┌─────────────────────────────────────────────────────────────┐  │
+│  │ RetrievalExecutor                                           │  │
+│  │   Executes chosen action:                                   │  │
+│  │   - search: hybrid search + rerank                          │  │
+│  │   - increase_topk: expand recall                            │  │
+│  │   - rewrite_query: expand query terms                       │  │
+│  └──────────────────────────┬──────────────────────────────────┘  │
+│                             │                                      │
+│                             ▼                                      │
+│  ┌─────────────────────────────────────────────────────────────┐  │
+│  │ RetrievalJudge                                              │  │
+│  │   Evidence completeness check:                              │  │
+│  │   retrievalQuality (0-1 heuristic)                          │  │
+│  │   missingEvidence (what's absent, not hallucinated)          │  │
+│  │   sufficient: true/false                                    │  │
+│  └──────────────────────────┬──────────────────────────────────┘  │
+│                             │                                      │
+│          ┌────────────────────┴────────────────────┐            │
+│          │                                         │            │
+│   sufficient → return                     insufficient → loop   │
+│                                                       │         │
+│                                                       ▼         │
+│                                                    ┌────────┐  │
+│                                                    │ Novita │  │
+│                                                    │ DeepSeek│ │
+│                                                    │ Answer │  │
+│                                                    └────────┘  │
+│  TELEMETRY                                                        │
+│  Events: agentic:strategy:start, agentic:action,                 │
+│  agentic:search, agentic:judge, agentic:strategy:complete,       │
+│  rerank:complete, hybrid:search, bm25:search, error, ...         │
 └────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -89,19 +122,32 @@ src/
 │   ├── registry.js           # DocRegistry + hashContent (diff classifier)
 │   ├── conversation.js       # ConversationStore (per-session history)
 │   └── interfaces.js         # abstract base classes (the seams)
+├── agentic/
+│   ├── observation.js        # shared state between planner/executor/judge
+│   ├── planner.js            # ConstrainedPlanner: finite action space
+│   ├── executor.js           # RetrievalExecutor: hybrid search + rerank
+│   ├── judge.js              # RetrievalJudge: evidence completeness
+│   └── strategies/
+│       ├── heuristic.js      # HeuristicRetrievalStrategy: composes planner+executor+judge
+│       └── stub.js           # StubRetrievalStrategy: deterministic test doubles
 ├── loaders/   mock.js real.js
-├── embedders/ mock.js gemini.js
-├── stores/    mock.js chroma.js      # incl. deleteByDocId (filtered delete)
-├── inference/ novita.js
-├── pipelines/
-│   ├── injection.js          # run() full rebuild + runIncremental() delta
-│   └── retrieval.js
+├── embedders/ mock.js gemini.js                 # real mode uses Gemini
+├── stores/    mock.js chroma.js                 # real mode uses Chroma
+├── stores/    bm25.js                           # inline BM25 index
+├── stores/    hybrid.js                         # vector + BM25 + RRF fusion
+├── rerankers/ mock.js real.js                   # mock heuristic / cross-encoder
+├── inference/ mock.js novita.js                 # mock / Novita DeepSeek
+├── pipelines/ injection.js                      # full rebuild + incremental
+│              retrieval.js                      # single-stage retrieval
+│              agentic-retrieval.js              # orchestrates Strategy for multi-step loop
 └── server.js                 # HTTP + WebSocket wiring
 tests/
 ├── runner.js                 # TestRunner + Assert
 ├── mock.test.js              # --test  (mock unit tests)
 ├── delta.test.js             # --delta-test  (incremental sync)
-└── real.test.js              # --real-test  (live integration)
+├── chroma.test.js            # --chroma-test
+├── real.test.js              # --real-test  (live integration)
+└── advanced.test.js          # --advanced-test (reranking / agentic / hybrid)
 ```
 
 ---
@@ -150,8 +196,8 @@ Server runs at `http://localhost:3000` (or custom port with `--port`).
 | POST   | `/inject`             | **Full rebuild** – clear Chroma + read ./input + chunk + embed + store (rebuilds the registry to match) |
 | POST   | `/inject-incremental` | **Differential sync** – hash‑diff vs registry, re‑embed only added/changed files, delete removed ones (no global clear) |
 | POST   | `/clear`              | Clear vector store **without** re‑injecting (also wipes the registry)       |
-| POST   | `/retrieve`           | Retrieve relevant chunks (no LLM) – body: `{query, topK?}`                 |
-| POST   | `/ask`                | Full RAG with conversation history – body: `{query, sessionId?, topK?}`    |
+| POST   | `/retrieve`           | **Hybrid retrieval** – vector + BM25 fused with RRF – body: `{query, topK?}`              |
+| POST   | `/ask`                | **Agentic RAG** – multi-step retrieval + rerank + conversation history – body: `{query, sessionId?, topK?}`    |
 
 **Example full rebuild (clears and injects everything from `./input`):**
 ```bash
@@ -232,7 +278,86 @@ Trigger via `POST /inject-incremental` or WebSocket `request:inject-incremental`
 - **LLM** – Novita DeepSeek receives: system prompt (with retrieved chunks), conversation history, and the current user query.
 - The assistant’s answer is appended to the conversation file.
 
-### 3. WebSocket Telemetry
+### 2. Agentic Retrieval Architecture
+
+`POST /ask` (and WebSocket `request:ask`) now uses a **Planner–Executor–Judge** architecture instead of a fixed loop.
+
+```
+Observation { query, results, topScore, previousActions }
+      │
+      ▼
+   Planner
+      │
+      ▼
+   Action (search | increase_topk | rewrite_query | answer | stop)
+      │
+      ▼
+   Executor
+      │
+      ▼
+   Observation (updated with new results)
+      │
+      ▼
+   Judge
+      │
+      ├── sufficient → return
+      ├── low score → Planner chooses increase_topk
+      ├── few results → Planner chooses rewrite_query
+      └── exhausted → stop
+```
+
+**Components:**
+
+| Component | Responsibility |
+|-----------|---------------|
+| **Observation** | Shared state: query, retrieved results, scores, previous actions, iteration count |
+| **ConstrainedPlanner** | Decides the next action from a finite set: `search`, `increase_topk`, `rewrite_query`, `answer`, `stop` |
+| **RetrievalExecutor** | Performs the chosen action: runs hybrid search, expands topK, rewrites query, or no-ops |
+| **RetrievalJudge** | Evaluates evidence completeness: reports `retrievalQuality`, `missingEvidence`, and `sufficient` — without hallucinating details the corpus doesn't contain |
+| **HeuristicRetrievalStrategy** | Composes Planner + Executor + Judge into a bounded iteration loop (max 4 steps by default) |
+
+**Why this matters:**
+
+Each component has one job. The Planner doesn't execute retrieval. The Judge doesn't decide the next action. This makes the system **observable, testable, and bounded** while still adapting retrieval instead of following a fixed pipeline.
+
+**Planner action space:**
+
+| Action | Trigger |
+|--------|---------|
+| `search` | Initial retrieval |
+| `increase_topk` | Low relevance score or insufficient results after rewrite |
+| `rewrite_query` | Few results and query hasn't been expanded yet |
+| `answer` | Sufficient evidence found |
+| `stop` | Max iterations reached OR no results at all |
+
+**Judge output example:**
+```json
+{
+  "sufficient": false,
+  "quality": 0.45,
+  "missing": ["only_1_document_found", "uncovered_query_terms: refunds, international"],
+  "reason": "quality=0.45 below 0.60, docs=1 < 2"
+}
+```
+
+**Key design rules:**
+- The Judge **only reports what is missing** from the current context. It cannot hallucinate corpus content it hasn't seen.
+- Every action includes an explicit `reason` for observability and debugging.
+- The loop is bounded by `maxSteps` to prevent runaway execution.
+
+Response includes `retrievalQuality`, `missingEvidence`, `finalAction`, and `steps`:
+```json
+{
+  "retrievalQuality": 0.72,
+  "missingEvidence": [],
+  "finalAction": { "type": "answer", "reason": "sufficient_evidence: 3 docs, topScore=0.82" },
+  "steps": [
+    { "type": "search", "query": "deep learning", "resultCount": 3, "reason": "initial retrieval" }
+  ]
+}
+```
+
+### 5. WebSocket Telemetry
 
 All pipeline steps emit events that can be consumed by a dashboard:
 - `injection:start`, `injection:documents-loaded`, `injection:chunks-created`, `injection:embeddings-generated`, `injection:document-stored`, `injection:complete`
@@ -269,6 +394,25 @@ You can also set `--real` flag to use real APIs; without it, the server runs in 
 node rag-server.js --test       # or: npm test
 ```
 Tests chunking, embedding consistency, vector search, `deleteByDocId`, and the registry diff classifier.
+
+### Run Advanced Tests (agentic, hybrid, reranking — no external dependencies)
+```bash
+node rag-server.js --advanced-test
+```
+Covers:
+- `MockEmbedder` content-correlation and determinism
+- `BM25Store` indexing, deletion, determinism
+- `HybridStore` RRF fusion and delegation
+- `MockReranker` word-overlap reordering
+- `ConstrainedPlanner` decision branches (answer / increase_topk / rewrite_query / stop)
+- `RetrievalJudge` evidence completeness without hallucination
+- `AgenticRetrievalPipeline` with `StubRetrievalStrategy`:
+  - immediate answer when strategy returns `finalAction`
+  - explicit stop when strategy returns `stop`
+  - multi-step action accumulation with explicit `reason` fields
+  - empty-corpus graceful handling
+  - determinism across identical cloned stores
+- `HeuristicRetrievalStrategy` returns explicit `finalAction`, `retrievalQuality`, and `missingEvidence`
 
 ### Run Delta (Incremental Sync) Tests (no external dependencies)
 ```bash
@@ -340,6 +484,13 @@ const { RAGServer, serverEvents, ConversationStore, DocRegistry, chunkText } = r
 const { GeminiEmbedder } = require('./src/embedders/gemini');
 const { ChromaVectorStore } = require('./src/stores/chroma');
 const { NovitaInference } = require('./src/inference/novita');
+const { BM25Store } = require('./src/stores/bm25');
+const { HybridStore } = require('./src/stores/hybrid');
+const { MockReranker } = require('./src/rerankers/mock');
+const { AgenticRetrievalPipeline } = require('./src/pipelines/agentic-retrieval');
+const { HeuristicRetrievalStrategy } = require('./src/agentic/strategies/heuristic');
+const { ConstrainedPlanner } = require('./src/agentic/planner');
+const { RetrievalJudge } = require('./src/agentic/judge');
 ```
 
 Example: manually run a full inject, then an incremental sync, from a script:
@@ -352,12 +503,40 @@ await server.injectionPipeline.run('./input', server.registry);            // fu
 await server.injectionPipeline.runIncremental('./input', server.registry); // delta only
 ```
 
+### Custom Agentic Strategies
+
+The agentic retrieval pipeline is composed of three interchangeable components:
+
+```javascript
+const { ConstrainedPlanner } = require('./src/agentic/planner');
+const { RetrievalExecutor } = require('./src/agentic/executor');
+const { RetrievalJudge } = require('./src/agentic/judge');
+
+// Create a custom strategy (pluggable heuristics, LLM-backed, or hybrid)
+class MyStrategy {
+  constructor(embedder, hybridStore, reranker) {
+    this.planner = new ConstrainedPlanner({ minResultsForAnswer: 3, lowScoreThreshold: 0.4 });
+    this.executor = new RetrievalExecutor(embedder, hybridStore, reranker);
+    this.judge = new RetrievalJudge({ sufficientThreshold: 0.7 });
+  }
+  async run(observation, maxIterations) {
+    // planner.decide → executor.execute → judge.evaluate → loop
+  }
+}
+```
+
+Replace the default `HeuristicRetrievalStrategy` with your own by passing it to `AgenticRetrievalPipeline`.
+
 ---
 
 ## 📊 Performance Notes (Real Mode)
 
 - **Chunking** – adds ~1‑5ms per document (negligible).
 - **Gemini embedding** – ~200‑500ms per chunk (batched for efficiency).
+- **BM25 indexing** – O(n) per document, very fast.
+- **Hybrid search (RRF)** – vector + keyword search, no extra latency beyond both queries.
+- **Reranker (cross-encoder)** – adds ~50‑200ms per batch.
+- **Agentic loop (2 steps)** – roughly 2–4× retrieval + rerank cost.
 - **Chroma query** – <50ms for small collections.
 - **Novita DeepSeek** – ~1‑3s per answer (depends on context size).
 - **WebSocket** – adds <1ms overhead per event.
@@ -380,6 +559,21 @@ A: Set `RAG_CHUNK_SIZE` env variable or modify the constants at the top of the f
 
 **Q: Can I use a different LLM?**  
 A: Yes – replace `NovitaInference` with another class that implements `generateAnswer()`.
+
+**Q: Can I use a different reranker?**  
+A: Yes – the server uses `CrossEncoderReranker` in real mode (REST endpoint) and `MockReranker` in mock mode. Swap the rerankers directory to change behavior.
+
+**Q: Why hybrid search instead of pure vector search?**  
+A: Pure vector search is semantic but can miss keyword matches. The system now uses **Reciprocal Rank Fusion (RRF)** to combine vector similarity with BM25 keyword scores for better recall.
+
+**Q: What does the agentic retrieval loop do?**  
+A: `/ask` uses a **Planner–Executor–Judge** architecture. The `ConstrainedPlanner` chooses from a finite action space (`search`, `increase_topk`, `rewrite_query`, `answer`, `stop`) based on evidence state. The `RetrievalExecutor` performs the action. The `RetrievalJudge` evaluates evidence completeness and reports `retrievalQuality`, `missingEvidence`, and `sufficient` without hallucinating. The response includes a `steps` array documenting each action with its explicit `reason`.
+
+**Q: Why isn't the agentic loop just a fixed heuristic?**  
+A: It is heuristic-driven today, but the architecture separates Planner, Executor, and Judge behind stable interfaces. You can swap `HeuristicRetrievalStrategy` for an LLM-backed strategy later without changing the pipeline, tests, or API.
+
+**Q: How do you test agentic scenarios deterministically?**  
+A: Two techniques: (1) `StubRetrievalStrategy` lets tests pre-program the exact action sequence the strategy returns, so tests verify the pipeline's reactions without depending on embedding quality. (2) `MockEmbedder` now produces **content-correlated** embeddings — texts with shared vocabulary get similar vectors — making retrieval and judge outcomes predictable.
 
 **Q: Does the server support streaming answers?**  
 A: Not yet – answers are returned as a single JSON field. Streaming can be added by extending the WebSocket protocol.
@@ -429,5 +623,5 @@ The dashboard is fully self‑contained, no build step required. It matches the 
 
 Refer to [System Evaluation Report](Report.md)
 
-*Updated: 2026-06-25*  
-*Corresponds to the modular `src/` layout with WebSocket, chunking, conversation history, incremental (differential) sync, and real API integrations.*
+*Updated: 2026-07-23*  
+*Corresponds to the modular `src/` layout with WebSocket, chunking, conversation history, incremental (differential) sync, hybrid BM25+vector retrieval (RRF), reranking, agentic multi-step retrieval with Planner-Executor-Judge architecture, and real API integrations.*

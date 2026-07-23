@@ -18,10 +18,11 @@ const { serverEvents } = require('./src/events');
 const { ConversationStore } = require('./src/core/conversation');
 const { DocRegistry } = require('./src/core/registry');
 const { chunkText } = require('./src/core/chunker');
-const { setupTests } = require('./tests/mock.test');
+const { setupTests: setupMockTests } = require('./tests/mock.test');
 const { setupRealTests } = require('./tests/real.test');
 const { runDeltaTests } = require('./tests/delta.test');
 const { runChromaTests } = require('./tests/chroma.test');
+const { setupTests: setupAdvancedTests } = require('./tests/advanced.test');
 
 async function main() {
   const args = process.argv.slice(2);
@@ -31,8 +32,14 @@ async function main() {
   } else if (args.includes('--chroma-test')) {
     try { await runChromaTests(); process.exit(0); }
     catch (e) { console.error('\n❌ Chroma tests failed:', e.message); process.exit(1); }
+  } else if (args.includes('--advanced-test')) {
+    try {
+      const runner = await setupAdvancedTests();
+      const ok = await runner.run();
+      process.exit(ok ? 0 : 1);
+    } catch(e) { console.error('\n❌ Advanced tests failed:', e.message); process.exit(1); }
   } else if (args.includes('--test')) {
-    const runner = await setupTests();
+    const runner = await setupMockTests();
     const ok = await runner.run();
     process.exit(ok ? 0 : 1);
   } else if (args.includes('--real-test')) {
@@ -55,6 +62,7 @@ async function main() {
 
 Usage:
   node rag-server.js --test               Run mock tests
+  node rag-server.js --advanced-test      Run reranking / agentic / hybrid tests
   node rag-server.js --delta-test         Run incremental-sync (delta) tests
   node rag-server.js --real-test          Run real integration tests
   node rag-server.js --server             Start mock server (port 3000)
@@ -64,8 +72,8 @@ Usage:
 Endpoints:
   POST /inject               Full rebuild (clear + embed everything)
   POST /inject-incremental   Differential sync (only re-embed the delta)
-  POST /retrieve             Vector search
-  POST /ask                  Retrieve + generate answer with history
+  POST /retrieve             Hybrid vector+BM25 retrieval
+  POST /ask                  Agentic retrieval (rerank + multi-step) + generate
 
 Environment variables:
   RAG_INPUT_DIR     = ./input   (directory with .md files)
