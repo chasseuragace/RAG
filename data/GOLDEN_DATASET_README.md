@@ -39,6 +39,54 @@ Your test suite protects the code. The golden dataset protects the **behavior**.
 
 ---
 
+## Golden dataset vs production — they are completely separate
+
+The golden dataset **never runs in production**. It has no role in the live request
+path. Here is the split:
+
+```
+Production:   user query → pipeline → policy decides → answer returned to user
+Evaluation:   golden fixture → ReplayHarness → policy decides → compare to your label
+```
+
+The golden set answers: *"does the policy still make the decisions I verified were
+correct?"* It is purely an offline regression test.
+
+---
+
+## How does LLMPolicy know what "good enough" is in production?
+
+`LLMPolicy` does not consult the golden dataset during production. What it receives
+in its prompt is:
+
+- The current assessment numbers (`quality`, `completeness`, `consistency`,
+  `sourceDiversity`, `missingEvidence`)
+- The goal parameters (`objective`, `minimumQuality`, `maxIterations`)
+- Prior actions already taken this iteration
+- The valid action vocabulary (`answer`, `increase_topk`, `rewrite_query`, `stop`)
+
+The LLM uses its own trained judgment — implicit in the model weights — to decide
+whether those numbers warrant answering or iterating. You are not explicitly teaching
+it your domain rules; you are relying on its general reasoning capability about
+information sufficiency.
+
+**This is both the strength and the weakness:**
+
+- Strength: it can reason about combinations of signals a heuristic threshold
+  cannot capture
+- Weakness: the judgment is implicit, can drift between model versions, and is
+  not inspectable
+
+**The golden dataset is how you catch the weakness.** You capture cases where you
+know what "good enough" looks like for your domain. When the LLM makes a different
+call, the ReplayHarness flags it. The golden set is the specification of what
+"good enough" means in *your* system — and LLMPolicy is measured against it.
+
+To see exactly what the LLM receives, read `_buildPrompt()` in
+`src/agentic/policies/llm.js`.
+
+---
+
 ## What a golden fixture actually is
 
 Each fixture records one moment in time:
@@ -85,60 +133,64 @@ alongside them. The `capturedWith` field tells you which is which.
 
 ## How to build the golden dataset
 
-### The workflow
+### The correct workflow
 
-1. Run a query through the pipeline and get a result
-2. Look at the retrieved chunks — read them
-3. Ask yourself: given only these chunks, can this question be answered?
-4. Decide the correct action: `answer`, `increase_topk`, `rewrite_query`, or `stop`
-5. Call `captureFixture` with your judgment
-6. The fixture is saved to `golden-decisions.json` automatically
+The capture flow is: **ask first, decide to save second.** Not the other way around.
+
+1. Go to the Console and type a real user query, click **Ask**
+2. Read the returned answer and sources
+3. Look at what the system decided (`finalAction` in the event log)
+4. Decide: was that the right call given what was retrieved?
+5. If yes — click **⊕ Save as Fixture** at the bottom of the Last Answer card
+6. A small inline panel opens with three fields:
+   - **Fixture ID** — a stable kebab-case name you choose
+   - **Expected Action** — pre-filled with what the system decided; change it if the system was wrong
+   - **Your Judgment** — one sentence explaining why the expected action is correct
+7. Click **Save Fixture** — done
+
+The system re-runs the query in the background, captures the real assessment values
+from that run, and saves everything to `data/golden-decisions.json`. You never type
+quality or completeness numbers by hand.
+
+### When to save
+
+Save when the system made a decision you agree with — that becomes a positive fixture.
+Save when the system made a wrong decision you caught — set the *correct*
+`expectedAction` and that becomes a regression fixture.
+
+You do not need to save every query. Five to ten well-chosen fixtures covering
+each action type (`answer`, `increase_topk`, `rewrite_query`, `stop`) give you
+a meaningful regression baseline.
+
+### Programmatic capture (scripts / tests)
+
+`GoldenDataset.captureFixture()` is also available directly for scripted capture:
 
 ```js
 const { GoldenDataset } = require('./src/core/golden-dataset');
-const { AgenticRetrievalPipeline } = require('./src/pipelines/agentic-retrieval');
-
 const dataset = new GoldenDataset();
-const pipeline = new AgenticRetrievalPipeline(embedder, store, reranker, goal);
 
-const fixture = await dataset.captureFixture({
-  pipeline,
+await dataset.captureFixture({
+  id:             'parang-rabbit-name',
+  pipeline,                            // AgenticRetrievalPipeline instance
   query:          'what did Parang name the rabbit',
   topK:           3,
   expectedAction: 'answer',
-  humanJudgment:  'Chunk containing "Well, Bingo. That\'s your name now." was retrieved. Direct answer.',
+  humanJudgment:  'Chunk with "Well, Bingo." directly answers the question.',
   tags:           ['domain:story', 'query-type:factual'],
-  pipelineMode:   'mock',   // or 'real' when using the real pipeline
+  pipelineMode:   'mock',
 });
 ```
 
-That's it. The assessment values are captured from the actual retrieval run.
-You never type quality or completeness numbers by hand.
-
 ### What to capture
 
-Capture moments that cover the decision space:
+Cover the full decision space:
 
-- **Queries with clear, direct answers** → should produce `answer`
-- **Queries that need multiple chunks** → should produce `increase_topk`
-- **Vague or ambiguous queries** → should produce `rewrite_query`
-- **Queries about things not in the corpus** → should produce `stop`
+- **Queries with clear, direct answers** → `answer`
+- **Queries that need multiple chunks** → `increase_topk`
+- **Vague or ambiguous queries** → `rewrite_query`
+- **Queries about things not in the corpus** → `stop`
 - **Queries after a prior rewrite** → set `traceActions: ['rewrite_query']`
-
-You do not need dozens of fixtures to start. Five to ten well-chosen ones covering
-each action type give you a meaningful regression baseline.
-
-### When to capture in production
-
-You said it well: "capture when I'm running in production and I like the answers."
-
-That is correct. When the real pipeline is running and the system makes a decision
-you agree with, capture it. When you catch the system making a wrong decision, capture
-it with the *correct* `expectedAction` — that becomes a regression fixture.
-
-Over time, `golden-decisions.json` becomes a record of your domain knowledge: a log
-of cases where you as the domain expert said "yes, this is what good retrieval looks
-like in this system."
 
 ---
 
