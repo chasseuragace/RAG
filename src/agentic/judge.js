@@ -1,4 +1,5 @@
 const { serverEvents } = require('../events');
+const { RetrievalAssessment } = require('./assessment');
 
 class RetrievalJudge {
   constructor(config = {}) {
@@ -8,25 +9,25 @@ class RetrievalJudge {
   }
 
   async evaluate(observation) {
-    const { results, rerankedResults, query, originalQuery, previousActions } = observation;
+    const { results, rerankedResults, query, previousActions } = observation;
     const topResults = rerankedResults.length > 0 ? rerankedResults : results;
     const topScore = topResults.length > 0 ? topResults[0].score : 0;
 
     const quality = this._retrievalQuality(topResults, topScore);
-    const missing = this._identifyMissing(topResults, query);
-    const sufficient = topResults.length >= this.minDocsForSufficiency && quality >= this.sufficientThreshold;
+    const completeness = this._completeness(topResults, query);
+    const consistency = this._consistency(topResults);
+    const sourceDiversity = this._sourceDiversity(topResults);
+    const missingEvidence = this._missingEvidence(topResults, query);
 
-    const judgment = {
-      sufficient,
+    serverEvents.logEvent('agentic:judge', {
       quality,
-      missing,
-      reason: sufficient
-        ? `quality=${quality.toFixed(2)}, docs=${topResults.length}`
-        : `quality=${quality.toFixed(2)} below ${this.sufficientThreshold}, docs=${topResults.length} < ${this.minDocsForSufficiency}`
-    };
+      completeness,
+      consistency,
+      sourceDiversity,
+      missingCount: missingEvidence.missingConcepts.length + missingEvidence.ambiguousTerms.length + missingEvidence.conflictingEvidence.length + missingEvidence.unsupportedClaims.length
+    });
 
-    serverEvents.logEvent('agentic:judge', { sufficient, quality, missing: missing.length, reason: judgment.reason });
-    return judgment;
+    return RetrievalAssessment.create(quality, completeness, consistency, sourceDiversity, missingEvidence);
   }
 
   _retrievalQuality(results, topScore) {
@@ -35,16 +36,52 @@ class RetrievalJudge {
     return scoreComponent * 0.6 + coverageComponent * 0.4;
   }
 
-  _identifyMissing(results, query) {
-    const missing = [];
+  _completeness(results, query) {
+    if (results.length === 0) return 0;
+    const queryTerms = new Set(query.toLowerCase().replace(/[^a-z0-9\s]/g, '').split(/\s+/).filter(t => t.length > 2));
+    if (queryTerms.size === 0) return 1;
+    const coveredTerms = new Set();
+    for (const r of results) {
+      const content = (r.metadata && r.metadata.content || '').toLowerCase();
+      for (const t of content.split(/\s+/)) {
+        if (queryTerms.has(t)) coveredTerms.add(t);
+      }
+    }
+    return coveredTerms.size / queryTerms.size;
+  }
+
+  _consistency(results) {
+    if (results.length < 2) return 1;
+    const scores = results.map(r => r.score);
+    const mean = scores.reduce((a, b) => a + b, 0) / scores.length;
+    const variance = scores.reduce((a, b) => a + (b - mean) ** 2, 0) / scores.length;
+    return Math.max(0, 1 - Math.sqrt(variance));
+  }
+
+  _sourceDiversity(results) {
+    const sources = new Set(results.map(r => r.metadata && r.metadata.original_id));
+    return sources.size;
+  }
+
+  _missingEvidence(results, query) {
+    const missingConcepts = [];
+    const ambiguousTerms = [];
+    const conflictingEvidence = [];
+    const unsupportedClaims = [];
+
     if (results.length === 0) {
-      missing.push('no_retrieved_documents');
-    } else if (results.length < this.minDocsForSufficiency) {
-      missing.push(`only_${results.length}_document_found`);
+      missingConcepts.push('no_retrieved_documents');
+      return { missingConcepts, ambiguousTerms, conflictingEvidence, unsupportedClaims };
     }
-    if (results.length > 0 && results[0].score < 0.3) {
-      missing.push('low_relevance_top_result');
+
+    if (results.length < this.minDocsForSufficiency) {
+      missingConcepts.push(`only_${results.length}_source_available`);
     }
+
+    if (results[0].score < 0.3) {
+      missingConcepts.push('low_relevance_top_result');
+    }
+
     const queryTerms = new Set(query.toLowerCase().replace(/[^a-z0-9\s]/g, '').split(/\s+/).filter(t => t.length > 2));
     const coveredTerms = new Set();
     for (const r of results) {
@@ -55,9 +92,10 @@ class RetrievalJudge {
     }
     const uncovered = [...queryTerms].filter(t => !coveredTerms.has(t)).slice(0, this.maxMissingItems);
     if (uncovered.length > 0) {
-      missing.push(`uncovered_query_terms: ${uncovered.join(', ')}`);
+      missingConcepts.push(`uncovered_query_terms: ${uncovered.join(', ')}`);
     }
-    return missing.slice(0, this.maxMissingItems);
+
+    return { missingConcepts, ambiguousTerms, conflictingEvidence, unsupportedClaims };
   }
 }
 

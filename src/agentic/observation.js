@@ -1,5 +1,5 @@
 class Observation {
-  constructor({ query, originalQuery, topK, results = [], rerankedResults = [], previousActions = [], iteration = 0, topScore = 0, retrievalQuality = 0, missingEvidence = [], judgment = null, finalAction = null }) {
+  constructor({ query, originalQuery, topK, results = [], rerankedResults = [], previousActions = [], iteration = 0, topScore = 0, assessment = null, decision = null, trace = null, goal = null }) {
     this.query = query;
     this.originalQuery = originalQuery || query;
     this.topK = topK;
@@ -8,14 +8,14 @@ class Observation {
     this.previousActions = previousActions;
     this.iteration = iteration;
     this.topScore = topScore;
-    this.retrievalQuality = retrievalQuality;
-    this.missingEvidence = missingEvidence;
-    this.judgment = judgment;
-    this.finalAction = finalAction;
+    this.assessment = assessment;
+    this.decision = decision;
+    this.trace = trace || new (require('./trace').Trace)();
+    this.goal = goal;
   }
 
-  static create(query, topK = 5) {
-    return new Observation({ query, originalQuery: query, topK });
+  static create(query, topK = 5, goal = null) {
+    return new Observation({ query, originalQuery: query, topK, goal });
   }
 
   withResults(results) {
