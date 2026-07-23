@@ -8,20 +8,18 @@ const { RetrievalExecutor } = require('../agentic/executor');
 const { serverEvents } = require('../events');
 
 class AgenticRetrievalPipeline extends RetrievalPipeline {
-  constructor(embedder, hybridStore, reranker, strategyOrGoal, policyOrMaxSteps) {
+  constructor(embedder, hybridStore, reranker, goal, policy) {
     super(embedder, hybridStore);
     this.embedder = embedder;
     this.hybridStore = hybridStore;
     this.reranker = reranker;
-    if (strategyOrGoal && typeof strategyOrGoal.run === 'function') {
-      this.strategy = strategyOrGoal;
-      this.goal = typeof policyOrMaxSteps === 'number'
-        ? { objective: 'BALANCED', latencyBudget: 5000, maxIterations: policyOrMaxSteps, minimumQuality: 0.5 }
-        : { objective: 'BALANCED', latencyBudget: 5000, maxIterations: 2, minimumQuality: 0.5 };
-    } else {
-      this.goal = strategyOrGoal || { objective: 'BALANCED', latencyBudget: 5000, maxIterations: 2, minimumQuality: 0.5 };
-      this.strategy = { run: this._createStrategy(embedder, hybridStore, reranker, policyOrMaxSteps) };
-    }
+    this.goal = goal || {
+      objective: 'BALANCED',
+      latencyBudget: 5000,
+      maxIterations: 2,
+      minimumQuality: 0.5
+    };
+    this.strategy = { run: this._createStrategy(embedder, hybridStore, reranker, policy) };
   }
 
   _createStrategy(embedder, hybridStore, reranker, policy) {

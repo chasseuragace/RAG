@@ -1,6 +1,6 @@
 const { serverEvents } = require('../events');
 const { Decision } = require('./decision');
-const { TraceEvent } = require('./trace');
+const { Trace, TraceEvent } = require('./trace');
 
 class Coordinator {
   constructor(judge, policy, executor) {
@@ -11,7 +11,7 @@ class Coordinator {
 
   async run(observation, goal) {
     const start = Date.now();
-    const trace = observation.trace || new (require('./trace').Trace)();
+    const trace = observation.trace || new Trace();
     let obs = observation;
     let remaining = goal.latencyBudget;
 
@@ -90,18 +90,32 @@ class Coordinator {
       }
     }
 
-    const fallback = Decision.create('stop', 'max_iterations_reached', { iterations: goal.maxIterations });
+    // Do a final judge+policy pass on the updated observation instead of
+    // blindly returning 'stop'. This handles the common case where the last
+    // iteration performed a retrieval action and the results are now sufficient.
+    const finalAssessment = await this.judge.evaluate(obs);
+    const finalDecision = await this.policy.resolve(finalAssessment, goal, trace);
+    const resolvedAction = (finalDecision.action === 'answer') ? 'answer' : 'stop';
+    const resolvedRationale = (finalDecision.action === 'answer')
+      ? finalDecision.rationale
+      : 'max_iterations_reached';
+    const resolvedEvidence = (finalDecision.action === 'answer')
+      ? finalDecision.evidence
+      : { iterations: goal.maxIterations };
+
     serverEvents.logEvent('agentic:strategy:complete', {
       iterations: goal.maxIterations,
-      action: 'stop',
-      reason: fallback.rationale,
+      action: resolvedAction,
+      reason: resolvedRationale,
     });
     return {
       ...obs,
-      assessment: await this.judge.evaluate(obs),
-      decision: fallback,
+      assessment: finalAssessment,
+      decision: finalDecision.action === 'answer'
+        ? finalDecision
+        : Decision.create('stop', resolvedRationale, resolvedEvidence),
       trace,
-      finalAction: { type: 'stop', reason: 'max_iterations_reached', evidence: { iterations: goal.maxIterations } },
+      finalAction: { type: resolvedAction, reason: resolvedRationale, evidence: resolvedEvidence },
       duration: `${Date.now() - start}ms`,
     };
   }

@@ -8,9 +8,11 @@ class RetrievalExecutor {
   }
 
   async execute(action, observation) {
-    serverEvents.logEvent('agentic:plan', { action: action.type, reason: action.reason, iteration: observation.iteration });
+    // Decision objects use .action; plain action objects use .type — support both.
+    const actionType = action.action || action.type;
+    serverEvents.logEvent('agentic:plan', { action: actionType, reason: action.rationale || action.reason, iteration: observation.iteration });
 
-    switch (action.type) {
+    switch (actionType) {
       case 'search':
         return this._search(observation, observation.topK, 'initial_search');
 
@@ -19,7 +21,7 @@ class RetrievalExecutor {
 
       case 'rewrite_query': {
         const expandedQuery = this._rewriteQuery(observation);
-        const newObs = observation.withAction({ type: 'rewrite_query', expandedQuery, reason: action.reason });
+        const newObs = observation.withAction({ type: 'rewrite_query', expandedQuery, reason: action.rationale || action.reason });
         return this._search(newObs, newObs.topK, 'rewrite_query', expandedQuery);
       }
 
@@ -30,7 +32,7 @@ class RetrievalExecutor {
         return observation.withAction(action);
 
       default:
-        serverEvents.logEvent('error', { stage: 'agentic:executor', message: `Unknown action: ${action.type}` });
+        serverEvents.logEvent('error', { stage: 'agentic:executor', message: `Unknown action: ${actionType}` });
         return observation.withAction({ ...action, error: 'unknown_action' });
     }
   }

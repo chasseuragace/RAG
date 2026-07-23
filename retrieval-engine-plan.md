@@ -48,6 +48,9 @@ Observation'  (updated with Trace)
 | Phase | Description | Status |
 |-------|-------------|--------|
 | 0 | Hybrid search (RRF), reranking, BM25, interfaces | ✅ |
+| 1 | Assessment + Trace + Goal (RetrievalAssessment, Decision, Coordinator, Policy) | ✅ |
+| 2 | Hypothesis-driven Actions (rationale + evidence on every Decision, trace preservation) | ✅ |
+| 3 | Additional Policies (AggressiveRetrievalPolicy, LowLatencyPolicy, BalancedPolicy) | ✅ |
 
 ---
 
@@ -88,35 +91,37 @@ Observation'  (updated with Trace)
 
 ---
 
-## Phase 2: Hypothesis-driven Actions
+## Phase 2: Hypothesis-driven Actions ✅
 
 **Goal:** Every `Decision` carries `rationale` (why) and `evidence` (what data supports it). Actions are explainable from the trace alone.
 
 **Modified files:**
-- `src/agentic/policies/heuristic.js` — generate `rationale` and `evidence` for each action
-- `src/agentic/trace.js` — record rationale in trace events
-- Tests: verify rationale and evidence fields on every action
+- `src/agentic/policies/heuristic.js` — rationale and evidence on all branches (was already complete)
+- `src/agentic/trace.js` — `toArray()` normalises both `Decision`-as-action and plain-action objects; `add()` emits rationale to `serverEvents`
+- `src/agentic/executor.js` — fixed `action.type` → `action.action || action.type` (Decision objects use `.action`)
+- `src/agentic/coordinator.js` — post-loop final judge+policy pass instead of hardcoded `stop`
+- `tests/phase2-3.test.js` — verifies rationale/evidence on all policy branches and trace serialization
 
-**Acceptance criteria:**
+**Acceptance criteria:** ✅
 - Every `Decision` has non-empty `rationale` and `evidence`
 - Trace events preserve rationale across iterations
 
 ---
 
-## Phase 3: Additional Policies
+## Phase 3: Additional Policies ✅
 
 **Goal:** Prove policy pluggability by adding policies that produce different decisions for the same assessment.
 
 **New files:**
-- `src/agentic/policies/aggressive.js` — `AggressiveRetrievalPolicy`
-- `src/agentic/policies/lowlatency.js` — `LowLatencyPolicy`
-- `src/agentic/policies/balanced.js` — `BalancedPolicy` (default)
+- `src/agentic/policies/aggressive.js` — `AggressiveRetrievalPolicy` (maximise recall, rewrite first)
+- `src/agentic/policies/lowlatency.js` — `LowLatencyPolicy` (answer fast, single topK expansion, no rewrites)
+- `src/agentic/policies/balanced.js` — `BalancedPolicy` (production default, replaces heuristic long-term)
 
 **Tests:**
-- Each policy produces a distinct decision for the same assessment/goal
-- Planner delegates to policy without adding logic
+- Each policy produces a distinct decision for the same assessment/goal ✅
+- Swapping policy changes pipeline behavior without touching coordinator, executor, or judge ✅
 
-**Acceptance criteria:**
+**Acceptance criteria:** ✅
 - Swapping policy changes behavior without touching coordinator, executor, or judge
 
 ---

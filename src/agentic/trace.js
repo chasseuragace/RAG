@@ -22,7 +22,8 @@ class Trace {
     serverEvents.logEvent('trace:event', {
       iteration: event.iteration,
       phase: event.phase,
-      action: event.action?.type || null,
+      action: event.action?.action || event.action?.type || null,
+      rationale: event.action?.rationale || event.decision?.rationale || null,
       timing: event.timing,
     });
   }
@@ -32,9 +33,24 @@ class Trace {
       timestamp: e.timestamp,
       iteration: e.iteration,
       phase: e.phase,
-      action: e.action ? { type: e.action.type, rationale: e.action.rationale, evidence: e.action.evidence } : null,
-      assessment: e.assessment ? { quality: e.assessment.quality, completeness: e.assessment.completeness, consistency: e.assessment.consistency, sourceDiversity: e.assessment.sourceDiversity, missingEvidence: e.assessment.missingEvidence } : null,
-      decision: e.decision ? { type: e.decision.action, rationale: e.decision.rationale, evidence: e.decision.evidence } : null,
+      // action may be a Decision (has .action) or a plain object (has .type)
+      action: e.action ? {
+        type: e.action.action || e.action.type || null,
+        rationale: e.action.rationale || e.action.reason || null,
+        evidence: e.action.evidence || null,
+      } : null,
+      assessment: e.assessment ? {
+        quality: e.assessment.quality,
+        completeness: e.assessment.completeness,
+        consistency: e.assessment.consistency,
+        sourceDiversity: e.assessment.sourceDiversity,
+        missingEvidence: e.assessment.missingEvidence,
+      } : null,
+      decision: e.decision ? {
+        type: e.decision.action,
+        rationale: e.decision.rationale,
+        evidence: e.decision.evidence,
+      } : null,
       timing: e.timing,
     }));
   }

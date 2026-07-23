@@ -23,6 +23,7 @@ const { setupRealTests } = require('./tests/real.test');
 const { runDeltaTests } = require('./tests/delta.test');
 const { runChromaTests } = require('./tests/chroma.test');
 const { setupTests: setupAdvancedTests } = require('./tests/advanced.test');
+const { setupTests: setupPhase23Tests } = require('./tests/phase2-3.test');
 
 async function main() {
   const args = process.argv.slice(2);
@@ -32,6 +33,12 @@ async function main() {
   } else if (args.includes('--chroma-test')) {
     try { await runChromaTests(); process.exit(0); }
     catch (e) { console.error('\n❌ Chroma tests failed:', e.message); process.exit(1); }
+  } else if (args.includes('--phase23-test')) {
+    try {
+      const runner = await setupPhase23Tests();
+      const ok = await runner.run();
+      process.exit(ok ? 0 : 1);
+    } catch(e) { console.error('\n❌ Phase 2/3 tests failed:', e.message); process.exit(1); }
   } else if (args.includes('--advanced-test')) {
     try {
       const runner = await setupAdvancedTests();
@@ -63,6 +70,7 @@ async function main() {
 Usage:
   node rag-server.js --test               Run mock tests
   node rag-server.js --advanced-test      Run reranking / agentic / hybrid tests
+  node rag-server.js --phase23-test       Run Phase 2 & 3 tests (rationale, evidence, policies)
   node rag-server.js --delta-test         Run incremental-sync (delta) tests
   node rag-server.js --real-test          Run real integration tests
   node rag-server.js --server             Start mock server (port 3000)
