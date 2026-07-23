@@ -12,9 +12,13 @@ const CONVERSATIONS_DIR = './conversations';
 const REGISTRY_FILE = process.env.RAG_REGISTRY_FILE || './data/doc-registry.json';
 const GOLDEN_DATASET_FILE = process.env.RAG_GOLDEN_DATASET_FILE || './data/golden-decisions.json';
 
+// Expert mode enables advanced UI panels (capture fixture, replay harness).
+// On by default — set RAG_EXPERT_MODE=false to hide them in production.
+const EXPERT_MODE = process.env.RAG_EXPERT_MODE !== 'false';
+
 // Ensure directories exist
 if (!fs.existsSync(INPUT_DIR)) fs.mkdirSync(INPUT_DIR, { recursive: true });
 if (!fs.existsSync(CONVERSATIONS_DIR)) fs.mkdirSync(CONVERSATIONS_DIR, { recursive: true });
 if (!fs.existsSync(path.dirname(REGISTRY_FILE))) fs.mkdirSync(path.dirname(REGISTRY_FILE), { recursive: true });
 
-module.exports = { INPUT_DIR, CHUNK_SIZE, CHUNK_OVERLAP, CONVERSATIONS_DIR, REGISTRY_FILE, GOLDEN_DATASET_FILE };
+module.exports = { INPUT_DIR, CHUNK_SIZE, CHUNK_OVERLAP, CONVERSATIONS_DIR, REGISTRY_FILE, GOLDEN_DATASET_FILE, EXPERT_MODE };

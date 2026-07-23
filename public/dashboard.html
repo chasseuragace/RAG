@@ -109,8 +109,34 @@
         .answer__q { font-weight: 600; margin-bottom: 6px; }
         .answer__a { white-space: pre-wrap; border-left: 2px solid var(--accent); padding-left: 12px; }
         .answer__src { margin-top: 10px; font-size: 12px; color: var(--muted); font-family: var(--mono); }
-        .empty { text-align: center; padding: 28px 16px; color: var(--faint); font-size: 13px; }
-        .muted { color: var(--muted); }
+        /* Tabs */
+        .tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border); padding: 0 24px; background: var(--surface); }
+        .tab { font-size: 12px; font-weight: 500; padding: 9px 14px; cursor: pointer; border-bottom: 2px solid transparent; color: var(--muted); transition: color 0.15s, border-color 0.15s; }
+        .tab:hover { color: var(--text); }
+        .tab--active { color: var(--accent); border-bottom-color: var(--accent); }
+        .tab--expert { color: var(--warn); }
+        .tab--expert.tab--active { color: var(--warn); border-bottom-color: var(--warn); }
+
+        /* Expert mode panel */
+        .expert-badge { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; padding: 2px 7px; border-radius: 4px; background: #fef3c7; color: var(--warn); border: 1px solid #fde68a; }
+        .field-group { display: flex; flex-direction: column; gap: 14px; }
+        .field { display: flex; flex-direction: column; gap: 5px; }
+        .field__label { font-size: 12px; font-weight: 600; color: var(--text); display: flex; align-items: center; gap: 6px; }
+        .field__required { font-size: 10px; color: var(--danger); font-weight: 700; }
+        .field__hint { font-size: 11px; color: var(--muted); line-height: 1.5; }
+        .field__hint strong { color: var(--text); font-weight: 600; }
+        .input--full { width: 100%; }
+        .textarea { font-size: 13px; padding: 8px 10px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--surface); color: var(--text); font-family: inherit; resize: vertical; min-height: 72px; }
+        .textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(79,70,229,0.12); }
+        .select { font-size: 13px; padding: 7px 10px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--surface); color: var(--text); font-family: inherit; cursor: pointer; }
+        .select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(79,70,229,0.12); }
+        .grid-expert { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+        @media (max-width: 640px) { .grid-expert { grid-template-columns: 1fr; } }
+        .fixture-result { background: #f8fafc; border: 1px solid var(--border); border-radius: 6px; padding: 12px; }
+        .fixture-result__row { display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px solid var(--border); font-size: 12px; }
+        .fixture-result__row:last-child { border-bottom: none; }
+        .fixture-result__key { color: var(--muted); }
+        .fixture-result__val { font-weight: 600; font-family: var(--mono); font-size: 11px; }
     </style>
 </head>
 <body>
@@ -120,7 +146,138 @@
     const { useState, useEffect, useRef } = React;
     const h = React.createElement;
 
+    // ─── field helper ───────────────────────────────────────────────────────
+    const field = (label, required, hint, input) =>
+      h('div', { className: 'field' },
+        h('label', { className: 'field__label' },
+          label,
+          required && h('span', { className: 'field__required' }, ' required')
+        ),
+        h('div', { className: 'field__hint', dangerouslySetInnerHTML: { __html: hint } }),
+        input
+      );
+
+    // ─── CaptureFixturePanel ────────────────────────────────────────────────
+    const CaptureFixturePanel = ({ sendWS }) => {
+      const empty = { id: '', description: '', query: '', topK: '3', expectedAction: 'answer', humanJudgment: '', tags: '', captureChunks: false };
+      const [form, setForm] = useState(empty);
+      const [status, setStatus] = useState(null);
+      const [saving, setSaving] = useState(false);
+      const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
+
+      const handleCapture = () => {
+        if (!form.id.trim())            return setStatus({ kind: 'error', text: 'ID is required.' });
+        if (!form.query.trim())         return setStatus({ kind: 'error', text: 'Query is required.' });
+        if (!form.humanJudgment.trim()) return setStatus({ kind: 'error', text: 'Human judgment is required.' });
+        setSaving(true); setStatus(null);
+        sendWS({
+          type: 'request:capture-fixture',
+          id: form.id.trim(), description: form.description.trim(),
+          query: form.query.trim(), topK: parseInt(form.topK) || 3,
+          expectedAction: form.expectedAction, humanJudgment: form.humanJudgment.trim(),
+          tags: form.tags.split(',').map(t => t.trim()).filter(Boolean),
+          captureChunks: form.captureChunks,
+        });
+      };
+
+      useEffect(() => {
+        const handler = (e) => {
+          setSaving(false);
+          if (e.detail.success) { setStatus({ kind: 'success', text: `Fixture "${e.detail.fixture.id}" saved.`, fixture: e.detail.fixture }); setForm(empty); }
+          else setStatus({ kind: 'error', text: e.detail.error });
+        };
+        window.addEventListener('capture-fixture:result', handler);
+        return () => window.removeEventListener('capture-fixture:result', handler);
+      }, []);
+
+      return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '20px' } },
+        h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px' } },
+          h('span', { className: 'expert-badge' }, 'Expert Mode'),
+          h('span', { style: { fontSize: '13px', color: 'var(--muted)' } },
+            'Run a query, review results, save your judgment as a golden fixture. ',
+            h('a', { href: 'https://github.com', target: '_blank', style: { color: 'var(--accent)' } }, 'Read the guide →')
+          )
+        ),
+        h('div', { className: 'notice notice--info' },
+          h('div', null,
+            h('strong', null, 'How this works: '),
+            'Fill in the fields and click Capture. The system runs your query through the live pipeline, records the real assessment values, and saves your expected action + judgment in ',
+            h('code', { style: { fontFamily: 'var(--mono)', fontSize: '12px' } }, 'data/golden-decisions.json'),
+            '. Run the Replay Harness later to verify a new policy still matches your judgments.'
+          )
+        ),
+        h('div', { className: 'field-group' },
+          h('div', { className: 'grid-expert' },
+            field('Fixture ID', true,
+              'Stable kebab-case identifier. <strong>Never reuse a deleted ID.</strong> Example: <code style="font-family:var(--mono)">parang-rabbit-name</code>',
+              h('input', { className: 'input input--full', placeholder: 'e.g. parang-rabbit-name', value: form.id, onChange: e => set('id', e.target.value) })
+            ),
+            field('Description', false,
+              'One sentence describing what this fixture tests. Used as a label in reports.',
+              h('input', { className: 'input input--full', placeholder: 'e.g. Direct question — answer is in the text', value: form.description, onChange: e => set('description', e.target.value) })
+            )
+          ),
+          field('Query', true,
+            'The exact query to run. The pipeline retrieves chunks for this and computes the assessment. <strong>Use a real user query, not a test string.</strong>',
+            h('input', { className: 'input input--full', placeholder: 'e.g. what did Parang name the rabbit', value: form.query, onChange: e => set('query', e.target.value) })
+          ),
+          h('div', { className: 'grid-expert' },
+            field('Top K', false,
+              'Number of chunks to retrieve. Default 3 is usually enough.',
+              h('input', { className: 'input input--full', type: 'number', min: '1', max: '20', value: form.topK, onChange: e => set('topK', e.target.value) })
+            ),
+            field('Expected Action', true,
+              '<strong>Your gold label.</strong> What the policy should decide given these results. Set this after reviewing the retrieved chunks — not based on any heuristic.',
+              h('select', { className: 'select', style: { width: '100%' }, value: form.expectedAction, onChange: e => set('expectedAction', e.target.value) },
+                h('option', { value: 'answer' },        'answer — results are sufficient'),
+                h('option', { value: 'increase_topk' }, 'increase_topk — need more chunks'),
+                h('option', { value: 'rewrite_query' }, 'rewrite_query — query is vague/ambiguous'),
+                h('option', { value: 'stop' },          'stop — information not in corpus')
+              )
+            )
+          ),
+          field('Human Judgment', true,
+            '<strong>Why</strong> you chose that expected action. The most important field — without it the fixture is unauditable. Example: "Chunk with \'Well, Bingo.\' directly answers the question."',
+            h('textarea', { className: 'textarea input--full', placeholder: 'Explain why the expected action is correct given the retrieved chunks…', value: form.humanJudgment, onChange: e => set('humanJudgment', e.target.value) })
+          ),
+          field('Tags', false,
+            'Comma-separated labels. Suggested: <code style="font-family:var(--mono)">domain:story</code>, <code style="font-family:var(--mono)">query-type:factual</code>, <code style="font-family:var(--mono)">query-type:ambiguous</code>, <code style="font-family:var(--mono)">query-type:out-of-domain</code>. <code style="font-family:var(--mono)">captured-with:mock</code> and <code style="font-family:var(--mono)">verified-by:human</code> are added automatically.',
+            h('input', { className: 'input input--full', placeholder: 'domain:story, query-type:factual', value: form.tags, onChange: e => set('tags', e.target.value) })
+          ),
+          h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px' } },
+            h('input', { type: 'checkbox', id: 'captureChunks', checked: form.captureChunks, onChange: e => set('captureChunks', e.target.checked) }),
+            h('label', { htmlFor: 'captureChunks', style: { fontSize: '13px' } }, 'Snapshot retrieved chunks'),
+            h('span', { style: { fontSize: '12px', color: 'var(--muted)' } }, '— saves chunk IDs and content in the fixture for auditing')
+          )
+        ),
+        h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center' } },
+          h('button', { className: 'btn btn--primary', onClick: handleCapture, disabled: saving }, saving ? 'Running pipeline…' : 'Capture Fixture'),
+          h('button', { className: 'btn', onClick: () => { setForm(empty); setStatus(null); } }, 'Clear'),
+          status && h('span', { style: { fontSize: '12px', color: status.kind === 'error' ? 'var(--danger)' : 'var(--success)' } }, status.text)
+        ),
+        status && status.kind === 'success' && status.fixture && h('div', null,
+          h('div', { style: { fontSize: '12px', fontWeight: '600', color: 'var(--muted)', marginBottom: '6px' } }, 'Saved fixture'),
+          h('div', { className: 'fixture-result' },
+            ...[
+              ['id', status.fixture.id],
+              ['query', status.fixture.sourceQuery],
+              ['expectedAction', status.fixture.expectedAction],
+              ['quality', status.fixture.assessment?.quality?.toFixed(3)],
+              ['completeness', status.fixture.assessment?.completeness?.toFixed(3)],
+              ['capturedWith', status.fixture.capturedWith],
+              ['tags', (status.fixture.tags || []).join(', ')],
+            ].map(([k, v]) => h('div', { className: 'fixture-result__row', key: k },
+              h('span', { className: 'fixture-result__key' }, k),
+              h('span', { className: 'fixture-result__val' }, v)
+            ))
+          )
+        )
+      );
+    };
+
     const Dashboard = () => {
+        const [activeTab, setActiveTab] = useState('console');
+        const [expertMode, setExpertMode] = useState(false);
         const [metrics, setMetrics] = useState(null);
         const [events, setEvents] = useState([]);
         const [connected, setConnected] = useState(false);
@@ -137,6 +294,8 @@
         const getPort = () => window.location.port || 3000;
 
         useEffect(() => {
+            fetch(`http://${window.location.hostname}:${window.location.port || 3000}/health`)
+              .then(r => r.json()).then(d => { if (d.expertMode) setExpertMode(true); }).catch(() => {});
             connectWebSocket();
             const metricsInterval = setInterval(() => {
                 if (wsRef.current && wsRef.current.readyState === 1) {
@@ -180,6 +339,8 @@
                 case 'metrics': setMetrics(msg.data); setConnected(true); break;
                 case 'stats': setServerStats(msg.data); break;
                 case 'event-log': setEvents(msg.data); break;
+                case 'capture-fixture:result':
+                    window.dispatchEvent(new CustomEvent('capture-fixture:result', { detail: msg.data })); break;
                 case 'inject:result': {
                     const d = msg.data;
                     if (!d.success) { setNotice({ kind: 'error', text: `Injection failed: ${d.error}` }); break; }
@@ -245,12 +406,19 @@
                 h('div', { className: 'app-header__inner' },
                     h('div', { className: 'app-title' }, 'RAG Server', h('span', null, 'Console')),
                     h('div', { className: 'status' },
+                        expertMode && h('div', { className: 'status__item' }, h('span', { className: 'expert-badge' }, 'Expert Mode')),
                         h('div', { className: 'status__item' }, h('span', { className: `dot ${connected ? 'dot--on' : 'dot--off'}` }), connected ? 'HTTP' : 'HTTP offline'),
                         h('div', { className: 'status__item' }, h('span', { className: `dot ${wsConnected ? 'dot--on' : 'dot--warn'}` }), wsConnected ? 'WebSocket' : 'WS offline')
                     )
                 )
             ),
-            h('div', { className: 'container' },
+            // Tabs
+            h('div', { className: 'tabs' },
+                h('div', { className: `tab ${activeTab === 'console' ? 'tab--active' : ''}`, onClick: () => setActiveTab('console') }, 'Console'),
+                expertMode && h('div', { className: `tab tab--expert ${activeTab === 'expert' ? 'tab--active' : ''}`, onClick: () => setActiveTab('expert') }, 'Capture Fixture')
+            ),
+            // Console tab
+            activeTab === 'console' && h('div', { className: 'container' },
 
                 // Controls
                 h('div', { className: 'card' },
@@ -347,6 +515,15 @@
                             h('div', { className: 'card__body', style: { borderTop: '1px solid var(--border)' } },
                                 h('pre', { className: 'code' }, JSON.stringify(events[selectedEvent], null, 2))
                             )
+                    )
+                )
+            ), // end console tab
+            // Expert tab
+            activeTab === 'expert' && expertMode && h('div', { className: 'container' },
+                h('div', { className: 'card' },
+                    h('div', { className: 'card__head' }, h('span', { className: 'card__title' }, 'Capture Fixture')),
+                    h('div', { className: 'card__body' },
+                        h(CaptureFixturePanel, { sendWS })
                     )
                 )
             )

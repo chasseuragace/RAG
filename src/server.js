@@ -6,10 +6,11 @@ const fs = require('fs');
 const path = require('path');
 const http = require('http');
 
-const { INPUT_DIR, CHUNK_SIZE, CHUNK_OVERLAP, CONVERSATIONS_DIR } = require('./config');
+const { INPUT_DIR, CHUNK_SIZE, CHUNK_OVERLAP, CONVERSATIONS_DIR, EXPERT_MODE } = require('./config');
 const { serverEvents } = require('./events');
 const { ConversationStore } = require('./core/conversation');
 const { DocRegistry } = require('./core/registry');
+const { GoldenDataset } = require('./core/golden-dataset');
 const { MockDocumentLoader } = require('./loaders/mock');
 const { RealDocumentLoader } = require('./loaders/real');
 const { MockEmbedder } = require('./embedders/mock');
@@ -45,6 +46,7 @@ class RAGServer {
   constructor(port = 3000, isReal = false) {
     this.port = port;
     this.isReal = isReal;
+    this.expertMode = EXPERT_MODE;
     this.injectionPipeline = null;
     this.retrievalPipeline = null;
     this.agenticPipeline = null;
@@ -179,6 +181,28 @@ class RAGServer {
       case 'ping':
         ws.send(JSON.stringify({ type: 'pong', timestamp: Date.now() }));
         break;
+      case 'request:capture-fixture': {
+        if (!this.expertMode) {
+          ws.send(JSON.stringify({ type: 'capture-fixture:result', data: { success: false, error: 'Expert mode is disabled.' } }));
+          break;
+        }
+        try {
+          const { id, description, query, topK, expectedAction, humanJudgment, pipelineMode, tags, captureChunks } = payload;
+          const dataset = new GoldenDataset();
+          const fixture = await dataset.captureFixture({
+            id, description, pipeline: this.agenticPipeline,
+            query, topK: topK || 3,
+            expectedAction, humanJudgment,
+            pipelineMode: pipelineMode || (this.isReal ? 'real' : 'mock'),
+            tags: tags || [],
+            captureChunks: captureChunks || false,
+          });
+          ws.send(JSON.stringify({ type: 'capture-fixture:result', data: { success: true, fixture } }));
+        } catch (err) {
+          ws.send(JSON.stringify({ type: 'capture-fixture:result', data: { success: false, error: err.message } }));
+        }
+        break;
+      }
       default:
         ws.send(JSON.stringify({ type: 'error', data: { message: `Unknown type: ${payload.type}` } }));
     }
@@ -220,7 +244,7 @@ class RAGServer {
     }
     else if (url === '/health' && req.method === 'GET') {
       res.writeHead(200);
-      res.end(JSON.stringify({ status: 'healthy', mode: this.isReal ? 'real' : 'mock', connectedClients: this.clients.size }));
+      res.end(JSON.stringify({ status: 'healthy', mode: this.isReal ? 'real' : 'mock', expertMode: this.expertMode, connectedClients: this.clients.size }));
     }
     else if (url === '/metrics' && req.method === 'GET') {
       res.writeHead(200);
@@ -291,6 +315,34 @@ class RAGServer {
           res.writeHead(200);
           res.end(JSON.stringify({ success: true, query, answer, sources: agenticResult.results, sessionId: sid, assessment: agenticResult.assessment, decision: agenticResult.decision, finalAction: agenticResult.finalAction, trace: agenticResult.trace, goal: agenticResult.goal }, null, 2));
         } catch(e) { res.writeHead(400); res.end(JSON.stringify({ error: e.message })); }
+      });
+    }
+    else if (url === '/capture-fixture' && req.method === 'POST') {
+      if (!this.expertMode) {
+        res.writeHead(403);
+        res.end(JSON.stringify({ error: 'Expert mode is disabled. Set RAG_EXPERT_MODE=true to enable.' }));
+        return;
+      }
+      let body = '';
+      req.on('data', c => body += c);
+      req.on('end', async () => {
+        try {
+          const { id, description, query, topK, expectedAction, humanJudgment, pipelineMode, tags, captureChunks } = JSON.parse(body);
+          const dataset = new GoldenDataset();
+          const fixture = await dataset.captureFixture({
+            id, description, pipeline: this.agenticPipeline,
+            query, topK: topK || 3,
+            expectedAction, humanJudgment,
+            pipelineMode: pipelineMode || (this.isReal ? 'real' : 'mock'),
+            tags: tags || [],
+            captureChunks: captureChunks || false,
+          });
+          res.writeHead(200);
+          res.end(JSON.stringify({ success: true, fixture }, null, 2));
+        } catch (err) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ success: false, error: err.message }));
+        }
       });
     }
     else {
