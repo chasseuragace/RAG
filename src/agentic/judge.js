@@ -207,7 +207,20 @@ class LLMJudge {
       return `[${i + 1}] (source: ${r.metadata?.original_id ?? 'unknown'}) ${content}`;
     }).join('\n\n');
 
-    return `You are assessing retrieved evidence for a RAG pipeline. A heuristic scorer already computed quality=${heuristic.quality.toFixed(3)} and completeness=${heuristic.completeness.toFixed(3)}, but it cannot detect semantic issues in the text itself. That's your job.
+    let conversationContext = '';
+    if (observation.contextPayload && observation.contextPayload.messages) {
+      const ctxMessages = observation.contextPayload.messages;
+      const summaryMsg = ctxMessages.find(m => m.content && m.content.includes('[Previous conversation summary]'));
+      if (summaryMsg) {
+        conversationContext += `\n## Previous Conversation Summary\n${summaryMsg.content.slice(0, 500)}\n`;
+      }
+      const recentMsg = ctxMessages.filter(m => m.role !== 'system' && !m.content?.includes('[Previous conversation summary]'));
+      if (recentMsg.length > 0) {
+        conversationContext += `\n## Recent Messages in Thread\n${recentMsg.map(m => `${m.role}: ${m.content.slice(0, 200)}`).join('\n')}\n`;
+      }
+    }
+
+    return `You are assessing retrieved evidence for a RAG pipeline. A heuristic scorer already computed quality=${heuristic.quality.toFixed(3)} and completeness=${heuristic.completeness.toFixed(3)}, but it cannot detect semantic issues in the text itself. That's your job.${conversationContext}
 
 ## Query
 ${observation.query}

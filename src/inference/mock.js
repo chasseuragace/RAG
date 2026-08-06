@@ -5,8 +5,9 @@ class MockInference {
     this.model = model;
   }
 
-  async generateAnswer(query, contextDocuments, conversationHistory = []) {
+  async generateAnswer(query, contextDocuments, conversationHistory = [], abortSignal = null) {
     const start = Date.now();
+    if (abortSignal) abortSignal.throwIfAborted();
     const contextText = contextDocuments.map((doc, idx) =>
       `[Document ${idx + 1}] (${doc.metadata.file || doc.id})\n${doc.metadata.content || ''}`
     ).join('\n\n');
@@ -18,8 +19,9 @@ class MockInference {
     return `[Mock] ${mockAnswer}`;
   }
 
-  async generateChat(messages, options = {}) {
+  async generateChat(messages, options = {}, abortSignal = null) {
     const start = Date.now();
+    if (abortSignal) abortSignal.throwIfAborted();
     const lastUser = [...messages].reverse().find(m => m.role === 'user');
     const mockAnswer = lastUser
       ? `Based on the retrieved documents: ${lastUser.content.slice(0, 100)}.`

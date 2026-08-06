@@ -1,28 +1,86 @@
 const { serverEvents } = require('../shared/events');
 const { Decision } = require('./decision');
 const { Trace, TraceEvent } = require('./trace');
+const { Message } = require('../shared/interfaces');
 
 class Coordinator {
-  constructor(judge, policy, executor, threadManager = null, contextWindowManager = null) {
+  constructor(judge, policy, executor, threadManager = null, contextWindowManager = null, options = {}) {
     this.judge = judge;
     this.policy = policy;
     this.executor = executor;
     this.threadManager = threadManager;
     this.contextWindowManager = contextWindowManager;
+    this.systemPrompt = options.systemPrompt || 'You are a helpful retrieval assistant.';
+    this.responseMaxTokens = options.responseMaxTokens || 1000;
+    this._addedQueries = new Set();
   }
 
   async _buildContext(obs) {
-    if (!this.threadManager || !this.contextWindowManager || !obs.thread) {
+    if (!this.threadManager || !this.contextWindowManager || !obs.query) {
       return obs;
     }
-    const thread = await this.threadManager.getThread(obs.thread.id);
-    const contextPayload = await this.contextWindowManager.buildContext(
-      thread,
-      '',
-      [],
-      1000
-    );
-    return obs.withContextPayload(contextPayload).withThread(thread);
+
+    const sessionId = obs.sessionId;
+    if (!sessionId) {
+      throw new Error('Observation missing sessionId — cannot fetch thread');
+    }
+
+    try {
+      const thread = await this.threadManager.getOrCreate(sessionId);
+
+      const queryKey = `${sessionId}::${obs.query}`;
+      if (!this._addedQueries.has(queryKey)) {
+        await this.threadManager.addMessage(sessionId, Message.create('user', obs.query));
+        this._addedQueries.add(queryKey);
+      }
+
+      const ragResults = obs.rerankedResults && obs.rerankedResults.length > 0
+        ? obs.rerankedResults
+        : obs.results;
+      const ragContext = ragResults.map(r => ({
+        id: r.id,
+        content: (r.metadata && r.metadata.content) || r.content || '',
+        score: r.score,
+      }));
+
+      const updatedThread = await this.threadManager.getThread(sessionId);
+      const contextPayload = await this.contextWindowManager.buildContext(
+        updatedThread,
+        this.systemPrompt,
+        ragContext,
+        this.responseMaxTokens
+      );
+
+      return obs.withContextPayload(contextPayload).withThread(updatedThread);
+    } catch (err) {
+      serverEvents.logEvent('agentic:context:error', { message: err.message, sessionId });
+      if (!this._contextRetryAttempted) {
+        this._contextRetryAttempted = true;
+        try {
+          const thread = await this.threadManager.getOrCreate(sessionId);
+          const ragResults = obs.rerankedResults && obs.rerankedResults.length > 0
+            ? obs.rerankedResults
+            : obs.results;
+          const ragContext = ragResults.map(r => ({
+            id: r.id,
+            content: (r.metadata && r.metadata.content) || r.content || '',
+            score: r.score,
+          }));
+          const updatedThread = await this.threadManager.getThread(sessionId);
+          const contextPayload = await this.contextWindowManager.buildContext(
+            updatedThread,
+            this.systemPrompt,
+            ragContext,
+            this.responseMaxTokens
+          );
+          return obs.withContextPayload(contextPayload).withThread(updatedThread);
+        } catch (retryErr) {
+          serverEvents.logEvent('agentic:context:retry-failed', { message: retryErr.message });
+        }
+      }
+      serverEvents.logEvent('agentic:context:degraded', { message: 'context build failed, proceeding without context' });
+      return obs;
+    }
   }
 
   async run(observation, goal) {
@@ -50,7 +108,7 @@ class Coordinator {
         timing: { ms: Date.now() - iterStart }
       }));
 
-      const decision = await this.policy.resolve(assessment, goal, trace);
+      const decision = await this.policy.resolve(assessment, goal, trace, obs);
       trace.add(new TraceEvent({
         timestamp: Date.now(),
         iteration: i,
@@ -109,7 +167,7 @@ class Coordinator {
     }
 
     const finalAssessment = await this.judge.evaluate(obs);
-    const finalDecision = await this.policy.resolve(finalAssessment, { ...goal, finalPass: true }, trace);
+    const finalDecision = await this.policy.resolve(finalAssessment, { ...goal, finalPass: true }, trace, obs);
     const resolvedAction = (finalDecision.action === 'answer') ? 'answer' : 'stop';
     const resolvedRationale = (finalDecision.action === 'answer')
       ? finalDecision.rationale

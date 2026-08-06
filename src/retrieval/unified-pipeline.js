@@ -35,14 +35,17 @@ class UnifiedRetrievalPipeline {
    * @param {string} query
    * @param {object} [opts]
    * @param {number} [opts.topK=5]
+   * @param {AbortSignal} [opts.abortSignal] — optional AbortSignal to cancel
    * @returns {Promise<{ success: boolean, graphFacts: string[], droppedGraphFacts: object[], candidates: object[], combined: string, duration: string }>}
    */
   async retrieve(query, opts = {}) {
+    const abortSignal = opts.abortSignal || null;
     const start = Date.now();
     const topK = opts.topK || 5;
     serverEvents.logEvent('unified:start', { query, topK });
 
     try {
+      if (abortSignal) abortSignal.throwIfAborted();
       // 1. Acronym expansion
       const expandedQuery = this.glossary ? await this.glossary.expand(query) : query;
 

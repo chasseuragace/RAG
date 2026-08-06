@@ -38,6 +38,31 @@ class ReplayHarness {
   }
 
   /**
+   * Reconstruct a minimal Observation from a golden fixture.
+   * Provides the query and goal so LLMPolicy can include
+   * conversation context in its prompt when available.
+   */
+  _buildObservation(fixture) {
+    const { Observation } = require('../agentic/observation');
+    return new Observation({
+      query: fixture.sourceQuery || '',
+      sessionId: fixture.sessionId || null,
+      results: (fixture.retrievedChunks || []).map(c => ({
+        id: c.id,
+        score: c.relevance || 0,
+        metadata: { content: c.content || '' },
+      })),
+      rerankedResults: (fixture.retrievedChunks || []).map(c => ({
+        id: c.id,
+        score: c.relevance || 0,
+        metadata: { content: c.content || '' },
+      })),
+      goal: fixture.goal || {},
+      contextPayload: fixture.contextPayload || null,
+    });
+  }
+
+  /**
    * Reconstruct a RetrievalAssessment from the plain object stored in a fixture.
    */
   _buildAssessment(raw) {
@@ -66,10 +91,11 @@ class ReplayHarness {
       const assessment = this._buildAssessment(fixture.assessment);
       const trace = this._buildTrace(fixture.traceActions || []);
       const goal = fixture.goal || {};
+      const observation = this._buildObservation(fixture);
 
       let actualAction, rationale, evidence, error;
       try {
-        const decision = await Promise.resolve(policy.resolve(assessment, goal, trace));
+        const decision = await Promise.resolve(policy.resolve(assessment, goal, trace, observation));
         actualAction = decision.action;
         rationale = decision.rationale;
         evidence = decision.evidence;

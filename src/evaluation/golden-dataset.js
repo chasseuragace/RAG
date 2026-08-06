@@ -125,31 +125,33 @@ class GoldenDataset {
    *     tags:           ['domain:story', 'query-type:factual'],
    *   });
    */
-  async captureFixture({
-    id,
-    description = '',
-    pipeline,
-    query,
-    topK = 3,
-    expectedAction,
-    humanJudgment,
-    pipelineMode = 'mock',
-    tags = [],
-    captureChunks = false,
-  }) {
-    if (!id)             throw new Error('captureFixture: id is required');
-    if (!pipeline)       throw new Error('captureFixture: pipeline is required');
-    if (!query)          throw new Error('captureFixture: query is required');
-    if (!expectedAction) throw new Error('captureFixture: expectedAction is required');
-    if (!humanJudgment)  throw new Error('captureFixture: humanJudgment is required — explain why expectedAction is correct');
+   async captureFixture({
+     id,
+     description = '',
+     pipeline,
+     query,
+     topK = 3,
+     expectedAction,
+     humanJudgment,
+     pipelineMode = 'mock',
+     tags = [],
+     captureChunks = false,
+   }, abortSignal = null) {
+     if (!id)             throw new Error('captureFixture: id is required');
+     if (!pipeline)       throw new Error('captureFixture: pipeline is required');
+     if (!query)          throw new Error('captureFixture: query is required');
+     if (!expectedAction) throw new Error('captureFixture: expectedAction is required');
+     if (!humanJudgment)  throw new Error('captureFixture: humanJudgment is required — explain why expectedAction is correct');
 
-    const validActions = ['answer', 'increase_topk', 'rewrite_query', 'stop'];
-    if (!validActions.includes(expectedAction)) {
-      throw new Error(`captureFixture: expectedAction must be one of ${validActions.join(', ')}`);
-    }
+     const validActions = ['answer', 'increase_topk', 'rewrite_query', 'stop'];
+     if (!validActions.includes(expectedAction)) {
+       throw new Error(`captureFixture: expectedAction must be one of ${validActions.join(', ')}`);
+     }
 
-    // Run the actual retrieval
-    const result = await pipeline.run(query, topK);
+     if (abortSignal) abortSignal.throwIfAborted();
+
+     // Run the actual retrieval
+     const result = await pipeline.run(query, topK, null, abortSignal);
 
     if (!result.success) {
       throw new Error(`captureFixture: pipeline run failed — ${result.error}`);

@@ -97,6 +97,24 @@ class RAGServer {
     const scorer       = new StaticDictionaryScorer();
     this.graphStore    = graphStore;
 
+    // ── Inference (shared between mock and real modes) ──
+    this.inference = this.isReal ? new NovitaInference() : new MockInference();
+
+    // ── Context-aware chat (before pipelines so they can use thread/context managers) ──
+    this.threadManager = createThreadManager();
+    const tokenCounter = new TokenCounter();
+    await tokenCounter.init();
+    const summarizer = new MessageSummarizer(this.inference);
+    this.contextWindowManager = new ContextWindowManager({
+      tokenCounter,
+      summarizer,
+      threadManager: this.threadManager,
+      modelContextWindow: MODEL_CONTEXT_WINDOW,
+      systemTokenBudget: SYSTEM_TOKEN_BUDGET,
+      responseTokenBudget: RESPONSE_MAX_TOKENS,
+      minMessagesToKeep: MIN_MESSAGES_TO_KEEP,
+    });
+
     if (this.isReal) {
       const embedder  = new GeminiEmbedder();
       const store     = new ChromaVectorStore();
@@ -105,7 +123,6 @@ class RAGServer {
       const loader    = new RealDocumentLoader();
       const baseReranker  = new CrossEncoderReranker();
       const reranker  = new AuthorityAwareReranker(scorer, { semanticReranker: baseReranker });
-      this.inference  = new NovitaInference();
       const judge     = new LLMJudge(this.inference);
       const queryRewriter = new LLMQueryRewriter(this.inference);
 
@@ -136,7 +153,10 @@ class RAGServer {
         embedder, hybrid, reranker,
         { objective: RetrievalObjectives.BALANCED, latencyBudget: 5000, maxIterations: 2, minimumQuality: 0.5 },
         null, judge, queryRewriter,
-        this.unifiedPipeline
+        this.unifiedPipeline,
+        this.threadManager,
+        this.contextWindowManager,
+        { systemPrompt: BASE_SYSTEM_PROMPT, responseMaxTokens: RESPONSE_MAX_TOKENS }
       );
 
       // Graph-RAG: dual-path parallel retrieval + context fusion + authority-aware rerank
@@ -160,7 +180,6 @@ class RAGServer {
       const loader    = new MockDocumentLoader();
       const baseReranker  = new MockReranker();
       const reranker  = new AuthorityAwareReranker(scorer, { semanticReranker: baseReranker });
-      this.inference  = new MockInference();
 
       // Injection: chunk → annotate authority → NER tag → rel extract → embed → store
       this.injectionPipeline = new ConcreteInjectionPipeline(
@@ -189,7 +208,10 @@ class RAGServer {
         embedder, hybrid, reranker,
         { objective: RetrievalObjectives.BALANCED, latencyBudget: 5000, maxIterations: 2, minimumQuality: 0.5 },
         null, null, null,
-        this.unifiedPipeline
+        this.unifiedPipeline,
+        this.threadManager,
+        this.contextWindowManager,
+        { systemPrompt: BASE_SYSTEM_PROMPT, responseMaxTokens: RESPONSE_MAX_TOKENS }
       );
 
       // Graph-RAG: dual-path parallel retrieval + context fusion + authority-aware rerank
@@ -208,23 +230,8 @@ class RAGServer {
 await this.injectionPipeline.run('/mock', this.registry);
        // @gotcha Mock mode blocks here until the full mock injection completes.
        //       Real mode returns immediately — the heavy lifting happens on /inject requests.
-     }
-
-// ── Context-aware chat ──
-    this.threadManager = createThreadManager();
-    const tokenCounter = new TokenCounter();
-    await tokenCounter.init();
-    const summarizer = new MessageSummarizer(this.inference);
-    this.contextWindowManager = new ContextWindowManager({
-      tokenCounter,
-      summarizer,
-      threadManager: this.threadManager,
-      modelContextWindow: MODEL_CONTEXT_WINDOW,
-      systemTokenBudget: SYSTEM_TOKEN_BUDGET,
-      responseTokenBudget: RESPONSE_MAX_TOKENS,
-      minMessagesToKeep: MIN_MESSAGES_TO_KEEP,
-    });
-    }
+      }
+  }
 
   setupWebSocket() {
     if (!WebSocketServer) return;
@@ -239,80 +246,85 @@ await this.injectionPipeline.run('/mock', this.registry);
       const listener = (event) => { if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'event', data: event })); };
       serverEvents.on('event', listener);
       ws.on('message', async (msg) => {
+        const ac = new AbortController();
+        const abortHandler = () => ac.abort();
+        ws.addEventListener('close', abortHandler);
         try {
           const payload = JSON.parse(msg);
-          await this.handleWebSocketMessage(ws, payload);
-        } catch(e) { ws.send(JSON.stringify({ type: 'error', data: { message: 'Invalid JSON' } })); }
+          await this.handleWebSocketMessage(ws, payload, ac.signal);
+        } catch(e) { if (e.name === 'AbortError') return; if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'error', data: { message: 'Invalid JSON' } })); }
+        ws.removeEventListener('close', abortHandler);
       });
       ws.on('close', () => { serverEvents.incrementConnectedClients(-1); serverEvents.removeListener('event', listener); this.clients.delete(ws); });
     });
   }
 
-  async handleWebSocketMessage(ws, payload) {
+  _wsSend(ws, data) {
+    if (ws.readyState !== 1) return;
+    ws.send(JSON.stringify(data));
+  }
+
+  async handleWebSocketMessage(ws, payload, abortSignal = null) {
     switch (payload.type) {
       case 'request:metrics':
-        ws.send(JSON.stringify({ type: 'metrics', data: serverEvents.getMetrics() }));
+        this._wsSend(ws, { type: 'metrics', data: serverEvents.getMetrics() });
         break;
       case 'request:event-log':
-        ws.send(JSON.stringify({ type: 'event-log', data: serverEvents.eventLog }));
+        this._wsSend(ws, { type: 'event-log', data: serverEvents.eventLog });
         break;
       case 'request:stats':
         const stats = await this.store.getStats();
         const graphStats = await this.graphStore.getStats();
-        ws.send(JSON.stringify({ type: 'stats', data: { ...stats, graph: graphStats } }));
+        this._wsSend(ws, { type: 'stats', data: { ...stats, graph: graphStats } });
         break;
       case 'request:inject':
-        // Full rebuild: clear + inject from INPUT_DIR. The pipeline rebuilds the
-        // registry to mirror what it embedded, so the next incremental run skips
-        // unchanged files instead of re-embedding the whole corpus.
-        const injectResult = await this.injectionPipeline.run(INPUT_DIR, this.registry);
-        ws.send(JSON.stringify({ type: 'inject:result', data: injectResult }));
+        const injectResult = await this.injectionPipeline.run(INPUT_DIR, this.registry, abortSignal);
+        this._wsSend(ws, { type: 'inject:result', data: injectResult });
         break;
       case 'request:inject-incremental':
-        // Differential sync: only re-embed added/changed files, drop removed.
-        const incResult = await this.injectionPipeline.runIncremental(INPUT_DIR, this.registry);
-        ws.send(JSON.stringify({ type: 'inject:result', data: incResult }));
+        const incResult = await this.injectionPipeline.runIncremental(INPUT_DIR, this.registry, abortSignal);
+        this._wsSend(ws, { type: 'inject:result', data: incResult });
         break;
-      case 'request:clear':  // legacy direct clear (still works)
+      case 'request:clear':
         await this.store.clear();
         await this.graphStore.clear();
         this._resetRegistry();
-        ws.send(JSON.stringify({ type: 'clear:result', data: { success: true } }));
+        this._wsSend(ws, { type: 'clear:result', data: { success: true } });
         break;
       case 'request:retrieve':
-        const retrieval = await this.retrievalPipeline.run(payload.query, payload.topK || 5);
-        ws.send(JSON.stringify({ type: 'retrieve:result', data: retrieval }));
+        const retrieval = await this.retrievalPipeline.run(payload.query, payload.topK || 5, abortSignal);
+        this._wsSend(ws, { type: 'retrieve:result', data: retrieval });
         break;
       case 'request:ask': {
+        if (ws.readyState !== 1) return;
         const sessionId = payload.sessionId || `anon_${Date.now()}_${Math.random().toString(36).substr(2, 8)}`;
-        // @gotcha `String.prototype.substr` is deprecated. Use `substring(2, 10)` instead.
         const topK = payload.topK || 3;
-        // Use GraphRAGPipeline: dual-path (graph traversal + NER-filtered hybrid)
-        const graphRagResult = await this.graphRagPipeline.run(payload.query, topK);
+        const graphRagResult = await this.graphRagPipeline.run(payload.query, topK, abortSignal);
+        if (abortSignal?.aborted) return;
         if (!graphRagResult.success) throw new Error(graphRagResult.error);
-        // Build context docs from vector chunks for inference
         const contextDocs = graphRagResult.vectorChunks.map(r => ({
           id: r.id,
           content: r.metadata?.content || '',
           metadata: r.metadata
         }));
 
-        let answer;
-        const thread = await this.threadManager.getOrCreate(sessionId);
-        const userMsg = Message.create('user', payload.query);
-        await this.threadManager.addMessage(sessionId, userMsg);
-        const updatedThread = await this.threadManager.getThread(sessionId);
-        const contextPayload = await this.contextWindowManager.buildContext(
-          updatedThread,
-          BASE_SYSTEM_PROMPT,
-          contextDocs,
-          RESPONSE_MAX_TOKENS
-        );
-        answer = await this.inference.generateChat(contextPayload.messages);
-        const assistantMsg = Message.create('assistant', answer);
-        await this.threadManager.addMessage(sessionId, assistantMsg);
+         let answer;
+         const thread = await this.threadManager.getOrCreate(sessionId, abortSignal);
+         const userMsg = Message.create('user', payload.query);
+         await this.threadManager.addMessage(sessionId, userMsg, abortSignal);
+         const updatedThread = await this.threadManager.getThread(sessionId, abortSignal);
+         const contextPayload = await this.contextWindowManager.buildContext(
+           updatedThread,
+           BASE_SYSTEM_PROMPT,
+           contextDocs,
+           RESPONSE_MAX_TOKENS,
+           abortSignal
+         );
+         answer = await this.inference.generateChat(contextPayload.messages, {}, abortSignal);
+         const assistantMsg = Message.create('assistant', answer);
+         await this.threadManager.addMessage(sessionId, assistantMsg, abortSignal);
 
-        ws.send(JSON.stringify({
+        this._wsSend(ws, {
           type: 'ask:result',
           data: {
             success: true,
@@ -325,36 +337,36 @@ await this.injectionPipeline.run('/mock', this.registry);
             graphPaths:     graphRagResult.graphPaths,
             sessionId,
           }
-        }));
+        });
         break;
       }
       case 'ping':
-        ws.send(JSON.stringify({ type: 'pong', timestamp: Date.now() }));
+        this._wsSend(ws, { type: 'pong', timestamp: Date.now() });
         break;
       case 'request:capture-fixture': {
         if (!this.expertMode) {
-          ws.send(JSON.stringify({ type: 'capture-fixture:result', data: { success: false, error: 'Expert mode is disabled.' } }));
+          this._wsSend(ws, { type: 'capture-fixture:result', data: { success: false, error: 'Expert mode is disabled.' } });
           break;
         }
-        try {
-          const { id, description, query, topK, expectedAction, humanJudgment, pipelineMode, tags, captureChunks } = payload;
-          const dataset = new GoldenDataset();
-          const fixture = await dataset.captureFixture({
-            id, description, pipeline: this.agenticPipeline,
-            query, topK: topK || 3,
-            expectedAction, humanJudgment,
-            pipelineMode: pipelineMode || (this.isReal ? 'real' : 'mock'),
-            tags: tags || [],
-            captureChunks: captureChunks || false,
-          });
-          ws.send(JSON.stringify({ type: 'capture-fixture:result', data: { success: true, fixture } }));
+         try {
+           const { id, description, query, topK, expectedAction, humanJudgment, pipelineMode, tags, captureChunks } = payload;
+           const dataset = new GoldenDataset();
+           const fixture = await dataset.captureFixture({
+             id, description, pipeline: this.agenticPipeline,
+             query, topK: topK || 3,
+             expectedAction, humanJudgment,
+             pipelineMode: pipelineMode || (this.isReal ? 'real' : 'mock'),
+             tags: tags || [],
+             captureChunks: captureChunks || false,
+           }, abortSignal);
+           this._wsSend(ws, { type: 'capture-fixture:result', data: { success: true, fixture } });
         } catch (err) {
-          ws.send(JSON.stringify({ type: 'capture-fixture:result', data: { success: false, error: err.message } }));
+          this._wsSend(ws, { type: 'capture-fixture:result', data: { success: false, error: err.message } });
         }
         break;
       }
       default:
-        ws.send(JSON.stringify({ type: 'error', data: { message: `Unknown type: ${payload.type}` } }));
+        this._wsSend(ws, { type: 'error', data: { message: `Unknown type: ${payload.type}` } });
     }
   }
 
@@ -413,119 +425,132 @@ await this.injectionPipeline.run('/mock', this.registry);
       serverEvents.on('event', listener);
       req.on('close', () => { serverEvents.removeListener('event', listener); serverEvents.incrementConnectedClients(-1); res.end(); });
     }
-    else if (url === '/inject' && req.method === 'POST') {
-      // Full rebuild: clear + inject from INPUT_DIR. The pipeline rebuilds the
-      // registry to match, so a later incremental sync won't re-embed everything.
-      this.injectionPipeline.run(INPUT_DIR, this.registry).then(result => {
-        res.writeHead(200);
-        res.end(JSON.stringify(result, null, 2));
-      }).catch(err => {
-        res.writeHead(500);
-        res.end(JSON.stringify({ error: err.message }));
-      });
-    }
-    else if (url === '/inject-incremental' && req.method === 'POST') {
-      // Differential sync: only re-embed the delta vs the registry.
-      this.injectionPipeline.runIncremental(INPUT_DIR, this.registry).then(result => {
-        res.writeHead(200);
-        res.end(JSON.stringify(result, null, 2));
-      }).catch(err => {
-        res.writeHead(500);
-        res.end(JSON.stringify({ error: err.message }));
-      });
+     else if (url === '/inject' && req.method === 'POST') {
+       const ac = new AbortController();
+       req.on('close', () => ac.abort());
+       this.injectionPipeline.run(INPUT_DIR, this.registry, ac.signal).then(result => {
+         if (ac.signal.aborted) return;
+         res.writeHead(200);
+         res.end(JSON.stringify(result, null, 2));
+       }).catch(err => {
+         if (ac.signal.aborted) return;
+         res.writeHead(500);
+         res.end(JSON.stringify({ error: err.message }));
+       });
+     }
+     else if (url === '/inject-incremental' && req.method === 'POST') {
+       const ac = new AbortController();
+       req.on('close', () => ac.abort());
+       this.injectionPipeline.runIncremental(INPUT_DIR, this.registry, ac.signal).then(result => {
+         if (ac.signal.aborted) return;
+         res.writeHead(200);
+         res.end(JSON.stringify(result, null, 2));
+       }).catch(err => {
+         if (ac.signal.aborted) return;
+         res.writeHead(500);
+         res.end(JSON.stringify({ error: err.message }));
+       });
     }
     else if (url === '/clear' && req.method === 'POST') {
       Promise.all([this.store.clear(), this.graphStore.clear()])
         .then(() => { this._resetRegistry(); res.end(JSON.stringify({ success: true })); })
         .catch(e => { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); });
     }
-    else if (url === '/retrieve' && req.method === 'POST') {
-      let body = '';
-      req.on('data', c => body += c);
-      req.on('end', async () => {
-        try {
-          const { query, topK } = JSON.parse(body);
-          const result = await this.retrievalPipeline.run(query, topK || 5);
-          res.writeHead(200);
-          res.end(JSON.stringify(result, null, 2));
-        } catch(e) { res.writeHead(400); res.end(JSON.stringify({ error: e.message })); }
-      });
-    }
-    else if (url === '/ask' && req.method === 'POST') {
-      let body = '';
-      req.on('data', c => body += c);
-      req.on('end', async () => {
-        try {
-          const { query, sessionId, topK = 3 } = JSON.parse(body);
-          const sid  = sessionId || `http_${Date.now()}_${Math.random().toString(36).substr(2, 8)}`;
-          const topKVal = topK;
-          // Dual-path: graph traversal + NER-filtered hybrid retrieval
-          const graphRagResult = await this.graphRagPipeline.run(query, topKVal);
-          if (!graphRagResult.success) throw new Error(graphRagResult.error);
+      else if (url === '/retrieve' && req.method === 'POST') {
+        const ac = new AbortController();
+        req.on('close', () => ac.abort());
+        let body = '';
+        req.on('data', c => body += c);
+        req.on('end', async () => {
+          try {
+            const { query, topK } = JSON.parse(body);
+            const result = await this.retrievalPipeline.run(query, topK || 5, ac.signal);
+            if (ac.signal.aborted) return;
+            res.writeHead(200);
+            res.end(JSON.stringify(result, null, 2));
+          } catch(e) { if (ac.signal.aborted) return; res.writeHead(400); res.end(JSON.stringify({ error: e.message })); }
+        });
+      }
+      else if (url === '/ask' && req.method === 'POST') {
+        const ac = new AbortController();
+        req.on('close', () => ac.abort());
+        let body = '';
+        req.on('data', c => body += c);
+        req.on('end', async () => {
+          try {
+            const { query, sessionId, topK = 3 } = JSON.parse(body);
+            const sid  = sessionId || `http_${Date.now()}_${Math.random().toString(36).substr(2, 8)}`;
+            const topKVal = topK;
+            const graphRagResult = await this.graphRagPipeline.run(query, topKVal, ac.signal);
+            if (ac.signal.aborted) return;
+            if (!graphRagResult.success) throw new Error(graphRagResult.error);
 
-          const contextDocs = graphRagResult.vectorChunks.map(r => ({
-            id: r.id,
-            content: r.metadata?.content || '',
-            metadata: r.metadata
-          }));
+            const contextDocs = graphRagResult.vectorChunks.map(r => ({
+              id: r.id,
+              content: r.metadata?.content || '',
+              metadata: r.metadata
+            }));
 
-          let answer;
-          const thread = await this.threadManager.getOrCreate(sid);
+            let answer;
+            const thread = await this.threadManager.getOrCreate(sid, ac.signal);
             const userMsg = Message.create('user', query);
-            await this.threadManager.addMessage(sid, userMsg);
-            const updatedThread = await this.threadManager.getThread(sid);
+            await this.threadManager.addMessage(sid, userMsg, ac.signal);
+            const updatedThread = await this.threadManager.getThread(sid, ac.signal);
             const contextPayload = await this.contextWindowManager.buildContext(
               updatedThread,
               BASE_SYSTEM_PROMPT,
               contextDocs,
-              RESPONSE_MAX_TOKENS
+              RESPONSE_MAX_TOKENS,
+              ac.signal
             );
-            answer = await this.inference.generateChat(contextPayload.messages);
+            if (ac.signal.aborted) return;
+            answer = await this.inference.generateChat(contextPayload.messages, {}, ac.signal);
+            if (ac.signal.aborted) return;
             const assistantMsg = Message.create('assistant', answer);
-            await this.threadManager.addMessage(sid, assistantMsg);
+            await this.threadManager.addMessage(sid, assistantMsg, ac.signal);
 
-          res.writeHead(200);
-          res.end(JSON.stringify({
-            success: true,
-            query,
-            expandedQuery: graphRagResult.expandedQuery,
-            entities:      graphRagResult.entities,
-            answer,
-            sources:       graphRagResult.vectorChunks,
-            graphFacts:    graphRagResult.context.graphFacts,
-            sessionId:     sid,
-          }, null, 2));
-        } catch(e) { res.writeHead(400); res.end(JSON.stringify({ error: e.message })); }
-      });
-    }
-    else if (url === '/capture-fixture' && req.method === 'POST') {
-      if (!this.expertMode) {
-        res.writeHead(403);
-        res.end(JSON.stringify({ error: 'Expert mode is disabled. Set RAG_EXPERT_MODE=true to enable.' }));
-        return;
+            res.writeHead(200);
+            res.end(JSON.stringify({
+              success: true,
+              query,
+              expandedQuery: graphRagResult.expandedQuery,
+              entities:      graphRagResult.entities,
+              answer,
+              sources:       graphRagResult.vectorChunks,
+              graphFacts:    graphRagResult.context.graphFacts,
+              sessionId:     sid,
+            }, null, 2));
+          } catch(e) { if (ac.signal.aborted) return; res.writeHead(400); res.end(JSON.stringify({ error: e.message })); }
+        });
       }
-      let body = '';
-      req.on('data', c => body += c);
-      req.on('end', async () => {
-        try {
-          const { id, description, query, topK, expectedAction, humanJudgment, pipelineMode, tags, captureChunks } = JSON.parse(body);
-          const dataset = new GoldenDataset();
-          const fixture = await dataset.captureFixture({
-            id, description, pipeline: this.agenticPipeline,
-            query, topK: topK || 3,
-            expectedAction, humanJudgment,
-            pipelineMode: pipelineMode || (this.isReal ? 'real' : 'mock'),
-            tags: tags || [],
-            captureChunks: captureChunks || false,
-          });
-          res.writeHead(200);
-          res.end(JSON.stringify({ success: true, fixture }, null, 2));
-        } catch (err) {
-          res.writeHead(400);
-          res.end(JSON.stringify({ success: false, error: err.message }));
-        }
-      });
-    }
+     else if (url === '/capture-fixture' && req.method === 'POST') {
+       if (!this.expertMode) {
+         res.writeHead(403);
+         res.end(JSON.stringify({ error: 'Expert mode is disabled. Set RAG_EXPERT_MODE=true to enable.' }));
+         return;
+       }
+       const ac = new AbortController();
+       req.on('close', () => ac.abort());
+       let body = '';
+       req.on('data', c => body += c);
+       req.on('end', async () => {
+         try {
+           const { id, description, query, topK, expectedAction, humanJudgment, pipelineMode, tags, captureChunks } = JSON.parse(body);
+           const dataset = new GoldenDataset();
+           const fixture = await dataset.captureFixture({
+             id, description, pipeline: this.agenticPipeline,
+             query, topK: topK || 3,
+             expectedAction, humanJudgment,
+             pipelineMode: pipelineMode || (this.isReal ? 'real' : 'mock'),
+             tags: tags || [],
+             captureChunks: captureChunks || false,
+           }, ac.signal);
+           if (ac.signal.aborted) return;
+           res.writeHead(200);
+           res.end(JSON.stringify({ success: true, fixture }, null, 2));
+         } catch (err) { if (ac.signal.aborted) return; res.writeHead(400); res.end(JSON.stringify({ success: false, error: err.message })); }
+       });
+     }
     else {
       res.writeHead(404);
       res.end(JSON.stringify({ error: 'Not found' }));
@@ -544,7 +569,24 @@ await this.injectionPipeline.run('/mock', this.registry);
       console.log(`📡 SSE events: http://localhost:${this.port}/events\n`);
     });
   }
-  stop() { if (this.server) this.server.close(); }
+  async stop() {
+    if (this.server) this.server.close();
+    if (this.wsServer) this.wsServer.close();
+    if (this.threadManager) {
+      try {
+        await this.threadManager.close();
+      } catch (err) {
+        console.warn('Error closing thread manager:', err.message);
+      }
+    }
+    if (this.graphStore && typeof this.graphStore.close === 'function') {
+      try {
+        await this.graphStore.close();
+      } catch (err) {
+        console.warn('Error closing graph store:', err.message);
+      }
+    }
+  }
 
   // After a full clear/inject the store no longer matches the registry, so wipe
   // it. The next incremental run then treats every file as newly added.

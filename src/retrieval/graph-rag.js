@@ -75,13 +75,15 @@ class GraphRAGPipeline {
   /**
    * @param {string} query
    * @param {number} [topK=5]
+   * @param {AbortSignal} [abortSignal] — optional AbortSignal to cancel the operation
    * @returns {Promise<GraphRAGResult>}
    */
-  async run(query, topK = 5) {
+  async run(query, topK = 5, abortSignal = null) {
     const start = Date.now();
     serverEvents.logEvent('graph-rag:start', { query, topK });
 
     try {
+      if (abortSignal) abortSignal.throwIfAborted();
       // ── Step 1: Acronym expansion ──────────────────────────────────────────
       const expandedQuery = this.glossary ? await this.glossary.expand(query) : query;
       // @gotcha `expand()` is async — missing `await` here passed a Promise to NER

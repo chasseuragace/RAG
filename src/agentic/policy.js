@@ -1,5 +1,5 @@
 class RetrievalPolicy {
-  resolve(assessment, goal, trace) {
+  resolve(assessment, goal, trace, observation = null) {
     throw new Error('not implemented');
   }
 }

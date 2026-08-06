@@ -8,7 +8,7 @@ const { RetrievalExecutor } = require('./executor');
 const { serverEvents } = require('../shared/events');
 
 class AgenticRetrievalPipeline extends RetrievalPipeline {
-  constructor(embedder, hybridStore, reranker, goal, policy, judge, queryRewriter, unifiedPipeline = null, threadManager = null, contextWindowManager = null) {
+  constructor(embedder, hybridStore, reranker, goal, policy, judge, queryRewriter, unifiedPipeline = null, threadManager = null, contextWindowManager = null, options = {}) {
     super(embedder, hybridStore);
     this.embedder = embedder;
     this.hybridStore = hybridStore;
@@ -21,6 +21,9 @@ class AgenticRetrievalPipeline extends RetrievalPipeline {
     };
     this.threadManager = threadManager;
     this.contextWindowManager = contextWindowManager;
+    this.systemPrompt = options.systemPrompt || 'You are a helpful retrieval assistant.';
+    this.responseMaxTokens = options.responseMaxTokens || 1000;
+    this._sessionId = null;
     this.strategy = { run: this._createStrategy(embedder, hybridStore, reranker, policy, judge, queryRewriter, unifiedPipeline, threadManager, contextWindowManager) };
   }
 
@@ -28,15 +31,23 @@ class AgenticRetrievalPipeline extends RetrievalPipeline {
     const judgeInstance = judge || new RetrievalJudge();
     const policyInstance = policy || new HeuristicRetrievalPolicy();
     const executor = new RetrievalExecutor(embedder, hybridStore, reranker, queryRewriter, unifiedPipeline);
-    const coordinator = new Coordinator(judgeInstance, policyInstance, executor, threadManager, contextWindowManager);
+    const coordinator = new Coordinator(judgeInstance, policyInstance, executor, threadManager, contextWindowManager, {
+      systemPrompt: this.systemPrompt,
+      responseMaxTokens: this.responseMaxTokens,
+    });
     return async (observation, maxIterations) => coordinator.run(observation, { ...this.goal, maxIterations });
   }
 
-  async run(query, topK = 5) {
+  async run(query, topK = 5, sessionId = null, abortSignal = null) {
     const start = Date.now();
-    serverEvents.logEvent('agentic:start', { query, maxIterations: this.goal.maxIterations, objective: this.goal.objective });
+    if (!this._sessionId) {
+      this._sessionId = sessionId || `sess_${Date.now()}_${Math.random().toString(36).substr(2, 8)}`;
+    }
+    const sid = this._sessionId;
+    serverEvents.logEvent('agentic:start', { query, maxIterations: this.goal.maxIterations, objective: this.goal.objective, sessionId: sid });
     try {
-      const observation = Observation.create(query, topK, this.goal);
+      if (abortSignal) abortSignal.throwIfAborted();
+      const observation = Observation.create(query, topK, this.goal, sid);
       const result = await this.strategy.run(observation, this.goal.maxIterations);
       const final = result.decision ? result.rerankedResults.slice(0, topK) : [];
       const duration = Date.now() - start;

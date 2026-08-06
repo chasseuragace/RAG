@@ -9,7 +9,8 @@ class ContextWindowManager {
     this.minMessagesToKeep = options.minMessagesToKeep || 3;
   }
 
-  async buildContext(thread, systemPrompt, ragContext = [], responseTokens) {
+  async buildContext(thread, systemPrompt, ragContext = [], responseTokens, abortSignal = null) {
+    if (abortSignal) abortSignal.throwIfAborted();
     const systemTokens = this.tokenCounter.count(systemPrompt);
     const ragTokens = ragContext.reduce((acc, chunk) => {
       const content = chunk.content || chunk;
@@ -18,7 +19,12 @@ class ContextWindowManager {
     const responseBudget = responseTokens || this.responseTokenBudget;
 
     const used = systemTokens + ragTokens + responseBudget;
-    const messageBudget = this.modelContextWindow - used;
+    let messageBudget = this.modelContextWindow - used;
+
+    if (messageBudget <= 0) {
+      console.warn('[ContextWindowManager] Context budget exceeded by fixed costs (RAG + system). Using minimum message budget of 4000 tokens.');
+      messageBudget = 4000;
+    }
 
     const messages = thread.messages;
     let accumulatedTokens = 0;

@@ -92,6 +92,18 @@ async function main() {
     const server = new RAGServer(port, isReal);
     await server.initialize();
     server.start();
+
+    const shutdown = async (signal) => {
+      console.log(`\n🛑 Received ${signal}, shutting down...`);
+      try {
+        await server.stop();
+      } catch (err) {
+        console.error('Error during shutdown:', err.message);
+      }
+      process.exit(0);
+    };
+    process.on('SIGTERM', () => shutdown('SIGTERM'));
+    process.on('SIGINT',  () => shutdown('SIGINT'));
   } else {
     console.log(`
 ╔══════════════════════════════════════════════════════════════╗

@@ -30,10 +30,11 @@ class ConcreteInjectionPipeline extends InjectionPipeline {
   // When a `registry` is passed it is rebuilt to mirror exactly what was just
   // embedded, so a subsequent incremental run sees everything as unchanged
   // (instead of re-embedding the whole corpus a second time).
-  async run(folderPath, registry = null) {
-    const start = Date.now();
-    serverEvents.logEvent('injection:start', { folderPath });
-    try {
+   async run(folderPath, registry = null, abortSignal = null) {
+     const start = Date.now();
+     serverEvents.logEvent('injection:start', { folderPath });
+     try {
+       if (abortSignal) abortSignal.throwIfAborted();
       // 1. Clear existing vectors
       await this.store.clear();
       serverEvents.logEvent('injection:cleared', {});
@@ -208,7 +209,7 @@ class ConcreteInjectionPipeline extends InjectionPipeline {
 
   // Differential sync: only re-embed added/changed docs, delete removed docs.
   // Never clears the whole store, so retrieval stays available throughout.
-  async runIncremental(folderPath, registry) {
+   async runIncremental(folderPath, registry, abortSignal = null) {
     const start = Date.now();
     serverEvents.logEvent('injection:start', { folderPath, mode: 'incremental' });
     try {

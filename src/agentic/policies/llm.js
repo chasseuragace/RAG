@@ -42,8 +42,8 @@ class LLMPolicy extends RetrievalPolicy {
     this.logPrompts = config.logPrompts || false;
   }
 
-  async resolve(assessment, goal, trace) {
-    const prompt = this._buildPrompt(assessment, goal, trace);
+  async resolve(assessment, goal, trace, observation = null) {
+    const prompt = this._buildPrompt(assessment, goal, trace, observation);
 
     if (this.logPrompts) {
       serverEvents.logEvent('llm:policy:prompt', { prompt });
@@ -83,7 +83,7 @@ class LLMPolicy extends RetrievalPolicy {
   }
 
 
-  _buildPrompt(assessment, goal, trace) {
+  _buildPrompt(assessment, goal, trace, observation = null) {
     const priorActions = this._priorActions(trace);
     const missingConcepts = assessment.missingEvidence?.missingConcepts || [];
     const isFinalPass = goal.finalPass === true;
@@ -91,8 +91,21 @@ class LLMPolicy extends RetrievalPolicy {
       ? ['answer', 'stop']
       : ['answer', 'increase_topk', 'rewrite_query', 'stop'];
 
-    return `You are a retrieval quality judge deciding the next action for a RAG pipeline.
+    let conversationContext = '';
+    if (observation && observation.contextPayload && observation.contextPayload.messages) {
+      const ctxMessages = observation.contextPayload.messages;
+      const summaryMsg = ctxMessages.find(m => m.content && m.content.includes('[Previous conversation summary]'));
+      if (summaryMsg) {
+        conversationContext += `\n## Previous Conversation Summary\n${summaryMsg.content.slice(0, 500)}\n`;
+      }
+      const recentMsg = ctxMessages.filter(m => m.role !== 'system' && !m.content?.includes('[Previous conversation summary]'));
+      if (recentMsg.length > 0) {
+        conversationContext += `\n## Recent Messages in Thread\n${recentMsg.map(m => `${m.role}: ${m.content.slice(0, 200)}`).join('\n')}\n`;
+      }
+    }
 
+    return `You are a retrieval quality judge deciding the next action for a RAG pipeline.
+${conversationContext}
 ## Current retrieval assessment
 - quality (relevance of top results): ${assessment.quality.toFixed(3)}
 - completeness (query term coverage): ${assessment.completeness.toFixed(3)}

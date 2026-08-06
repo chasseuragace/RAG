@@ -8,43 +8,54 @@ class PostgresThreadManager {
       connectionString: connectionString || PG_CONNECTION_STRING,
     });
     this._initialized = false;
+    this._disabled = false;
   }
 
   async _init() {
-    if (this._initialized) return;
-    const client = await this._pool.connect();
+    if (this._initialized || this._disabled) return;
     try {
-      await client.query(`
-        CREATE TABLE IF NOT EXISTS threads (
-          session_id TEXT PRIMARY KEY,
-          summary TEXT,
-          last_summarized_index INTEGER DEFAULT 0,
-          metadata JSONB DEFAULT '{}',
-          created_at TIMESTAMP DEFAULT NOW(),
-          updated_at TIMESTAMP DEFAULT NOW()
-        )
-      `);
-      await client.query(`
-        CREATE TABLE IF NOT EXISTS messages (
-          id TEXT PRIMARY KEY,
-          thread_id TEXT NOT NULL REFERENCES threads(session_id) ON DELETE CASCADE,
-          role TEXT NOT NULL CHECK (role IN ('system', 'user', 'assistant', 'tool')),
-          content TEXT NOT NULL,
-          metadata JSONB DEFAULT '{}',
-          token_count INTEGER,
-          created_at TIMESTAMP DEFAULT NOW()
-        )
-      `);
-      await client.query(`CREATE INDEX IF NOT EXISTS idx_messages_thread_id ON messages(thread_id)`);
-      await client.query(`CREATE INDEX IF NOT EXISTS idx_messages_thread_id_created ON messages(thread_id, created_at)`);
-      this._initialized = true;
-    } finally {
-      client.release();
+      const client = await this._pool.connect();
+      try {
+        await client.query(`
+          CREATE TABLE IF NOT EXISTS threads (
+            session_id TEXT PRIMARY KEY,
+            summary TEXT,
+            last_summarized_index INTEGER DEFAULT 0,
+            metadata JSONB DEFAULT '{}',
+            created_at TIMESTAMP DEFAULT NOW(),
+            updated_at TIMESTAMP DEFAULT NOW()
+          )
+        `);
+        await client.query(`
+          CREATE TABLE IF NOT EXISTS messages (
+            id TEXT PRIMARY KEY,
+            thread_id TEXT NOT NULL REFERENCES threads(session_id) ON DELETE CASCADE,
+            role TEXT NOT NULL CHECK (role IN ('system', 'user', 'assistant', 'tool')),
+            content TEXT NOT NULL,
+            metadata JSONB DEFAULT '{}',
+            token_count INTEGER,
+            created_at TIMESTAMP DEFAULT NOW()
+          )
+        `);
+        await client.query(`CREATE INDEX IF NOT EXISTS idx_messages_thread_id ON messages(thread_id)`);
+        await client.query(`CREATE INDEX IF NOT EXISTS idx_messages_thread_id_created ON messages(thread_id, created_at)`);
+        this._initialized = true;
+      } finally {
+        client.release();
+      }
+    } catch (err) {
+      console.error('Postgres not available, thread manager disabled:', err.message);
+      this._disabled = true;
     }
   }
 
-  async getOrCreate(threadId) {
+  async getOrCreate(threadId, abortSignal = null) {
     await this._init();
+    if (this._disabled) {
+      const { Thread } = require('../shared/interfaces');
+      return Thread.create(threadId, {});
+    }
+    if (abortSignal) abortSignal.throwIfAborted();
     const client = await this._pool.connect();
     try {
       await client.query(
@@ -79,8 +90,10 @@ class PostgresThreadManager {
     }
   }
 
-  async addMessage(threadId, message) {
+  async addMessage(threadId, message, abortSignal = null) {
     await this._init();
+    if (this._disabled) return;
+    if (abortSignal) abortSignal.throwIfAborted();
     const client = await this._pool.connect();
     try {
       await client.query(
@@ -96,12 +109,14 @@ class PostgresThreadManager {
     }
   }
 
-  async getThread(threadId) {
-    return this.getOrCreate(threadId);
+  async getThread(threadId, abortSignal = null) {
+    return this.getOrCreate(threadId, abortSignal);
   }
 
-  async updateSummary(threadId, summary, lastSummarizedIndex) {
+  async updateSummary(threadId, summary, lastSummarizedIndex, abortSignal = null) {
     await this._init();
+    if (this._disabled) return;
+    if (abortSignal) abortSignal.throwIfAborted();
     const client = await this._pool.connect();
     try {
       await client.query(
@@ -113,8 +128,10 @@ class PostgresThreadManager {
     }
   }
 
-  async listThreads(filters = {}) {
+  async listThreads(filters = {}, abortSignal = null) {
     await this._init();
+    if (this._disabled) return [];
+    if (abortSignal) abortSignal.throwIfAborted();
     const client = await this._pool.connect();
     try {
       const limit = filters.limit || 50;
@@ -137,7 +154,13 @@ class PostgresThreadManager {
   }
 
   async close() {
-    await this._pool.end();
+    if (this._pool) {
+      try {
+        await this._pool.end();
+      } catch (err) {
+        console.warn('Error closing database pool:', err.message);
+      }
+    }
   }
 }
 

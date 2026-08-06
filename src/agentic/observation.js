@@ -1,6 +1,7 @@
 class Observation {
-  constructor({ query, originalQuery, topK, results = [], rerankedResults = [], previousActions = [], iteration = 0, topScore = 0, assessment = null, decision = null, trace = null, goal = null, thread = null, contextPayload = null }) {
+  constructor({ query, sessionId = null, originalQuery, topK, results = [], rerankedResults = [], previousActions = [], iteration = 0, topScore = 0, assessment = null, decision = null, trace = null, goal = null, thread = null, contextPayload = null }) {
     this.query = query;
+    this.sessionId = sessionId;
     this.originalQuery = originalQuery || query;
     this.topK = topK;
     this.results = results;
@@ -16,8 +17,8 @@ class Observation {
     this.contextPayload = contextPayload;
   }
 
-  static create(query, topK = 5, goal = null) {
-    return new Observation({ query, originalQuery: query, topK, goal });
+  static create(query, topK = 5, goal = null, sessionId = null) {
+    return new Observation({ query, originalQuery: query, topK, goal, sessionId });
   }
 
   withResults(results) {
@@ -41,6 +42,10 @@ class Observation {
 
   withThread(thread) {
     return new Observation({ ...this, thread });
+  }
+
+  withSessionId(sessionId) {
+    return new Observation({ ...this, sessionId });
   }
 
   withContextPayload(contextPayload) {

@@ -89,11 +89,12 @@ class NEREnrichedRetrievalPipeline {
     this.reranker   = opts.reranker || null;
   }
 
-  async run(query, topK = 5) {
+  async run(query, topK = 5, abortSignal = null) {
     const start = Date.now();
     serverEvents.logEvent('retrieval:ner:start', { query, topK });
 
     try {
+      if (abortSignal) abortSignal.throwIfAborted();
       // ── Step 1: Acronym expansion ──────────────────────────────────────────
       const expandedQuery = this.glossary ? await this.glossary.expand(query) : query;
       if (expandedQuery !== query) {
