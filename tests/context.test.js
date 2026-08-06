@@ -5,6 +5,7 @@ const { ContextWindowManager } = require('../src/shared/context-window-manager')
 const { Thread, Message } = require('../src/shared/interfaces');
 const { createThreadManager } = require('../src/session/thread-manager-factory');
 const { PostgresThreadManager } = require('../src/session/postgres-thread-manager');
+const { Observation } = require('../src/agentic/observation');
 
 async function setupTests() {
   const runner = new TestRunner();
@@ -190,6 +191,93 @@ async function setupTests() {
     await a.assertEqual(typeof PostgresThreadManager.prototype.getThread, 'function', 'has getThread');
     await a.assertEqual(typeof PostgresThreadManager.prototype.updateSummary, 'function', 'has updateSummary');
     await a.assertEqual(typeof PostgresThreadManager.prototype.listThreads, 'function', 'has listThreads');
+  });
+
+  // ── Observation.sessionId ──
+
+  runner.test('Observation.create() accepts sessionId', async (a) => {
+    const obs = Observation.create('test query', 5, null, 'my-session-123');
+    await a.assertEqual(obs.sessionId, 'my-session-123', 'sessionId is set');
+  });
+
+  runner.test('Observation.sessionId is carried through withResults()', async (a) => {
+    const obs = Observation.create('query', 5, null, 'sess-1');
+    const withResults = obs.withResults([{ id: 'r1', score: 0.9, metadata: { content: 'test' } }]);
+    await a.assertEqual(withResults.sessionId, 'sess-1', 'sessionId preserved in withResults');
+  });
+
+  runner.test('Observation.sessionId is carried through withThread()', async (a) => {
+    const obs = Observation.create('query', 5, null, 'sess-2');
+    const thread = Thread.create('sess-2');
+    const withThread = obs.withThread(thread);
+    await a.assertEqual(withThread.sessionId, 'sess-2', 'sessionId preserved in withThread');
+  });
+
+  runner.test('Observation.sessionId is carried through withContextPayload()', async (a) => {
+    const obs = Observation.create('query', 5, null, 'sess-3');
+    const withCtx = obs.withContextPayload({ messages: [], totalTokens: 100 });
+    await a.assertEqual(withCtx.sessionId, 'sess-3', 'sessionId preserved in withContextPayload');
+  });
+
+  runner.test('Observation.sessionId defaults to null', async (a) => {
+    const obs = Observation.create('query');
+    await a.assertEqual(obs.sessionId, null, 'sessionId defaults to null');
+  });
+
+  // ── ContextWindowManager negative budget guard ──
+
+  runner.test('ContextWindowManager.buildContext() warns and uses minimum budget when exceeded', async (a) => {
+    const tokenCounter = new TokenCounter();
+    await tokenCounter.init();
+    const summarizer = new MessageSummarizer(new (require('../src/inference/mock').MockInference)());
+    const cwm = new ContextWindowManager({
+      tokenCounter,
+      summarizer,
+      modelContextWindow: 100,
+      systemTokenBudget: 500,
+      responseTokenBudget: 1000,
+      minMessagesToKeep: 3,
+    });
+
+    const thread = Thread.create('test-session');
+    thread.messages.push(Message.create('user', 'hello'));
+
+    const result = await cwm.buildContext(thread, 'System prompt.', [], 1000);
+    await a.assertEqual(Array.isArray(result.messages), true, 'messages is array even when budget exceeded');
+    await a.assertTrue(result.messages.length > 0, 'has messages despite negative budget');
+  });
+
+  // ── PostgresThreadManager graceful degradation ──
+
+  runner.test('PostgresThreadManager._disabled returns empty Thread for getOrCreate when disabled', async (a) => {
+    const mgr = new PostgresThreadManager('postgresql://invalid/invalid');
+    mgr._disabled = true;
+    const thread = await mgr.getOrCreate('test-session');
+    await a.assertEqual(thread.id, 'test-session', 'returns a Thread even when disabled');
+    await a.assertEqual(thread.messages.length, 0, 'Thread has no messages when disabled');
+  });
+
+  runner.test('PostgresThreadManager.addMessage() is no-op when disabled', async (a) => {
+    const mgr = new PostgresThreadManager('postgresql://invalid/invalid');
+    mgr._disabled = true;
+    const msg = Message.create('user', 'hello');
+    await mgr.addMessage('test-session', msg);
+    await a.assertEqual(true, true, 'addMessage does not throw when disabled');
+  });
+
+  runner.test('PostgresThreadManager.listThreads() returns empty array when disabled', async (a) => {
+    const mgr = new PostgresThreadManager('postgresql://invalid/invalid');
+    mgr._disabled = true;
+    const threads = await mgr.listThreads();
+    await a.assertEqual(Array.isArray(threads), true, 'returns array when disabled');
+    await a.assertEqual(threads.length, 0, 'returns empty array when disabled');
+  });
+
+  runner.test('PostgresThreadManager.close() handles disabled state without error', async (a) => {
+    const mgr = new PostgresThreadManager('postgresql://invalid/invalid');
+    mgr._disabled = true;
+    await mgr.close();
+    await a.assertEqual(true, true, 'close() does not throw when disabled');
   });
 
   return runner;

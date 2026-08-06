@@ -26,6 +26,7 @@ const { BM25Store } = require('../src/retrieval/stores/bm25');
 const { HybridStore } = require('../src/retrieval/stores/hybrid');
 const { MockReranker } = require('../src/retrieval/rerankers/mock');
 const { AgenticRetrievalPipeline } = require('../src/agentic/pipeline');
+const { Observation } = require('../src/agentic/observation');
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
@@ -656,7 +657,37 @@ async function setupTests() {
     fs.unlinkSync(file);
   });
 
-  return runner;
-}
+   runner.test('ReplayHarness passes reconstructed observation to policy.resolve', async (a) => {
+     const file = tempDatasetPath();
+     const ds = new GoldenDataset(file);
+     ds.replaceAll([
+       {
+         id: 'obs-check', description: 'replay harness passes observation', tags: [],
+         assessment: { quality: 0.82, completeness: 0.90, consistency: 0.75, sourceDiversity: 3, missingEvidence: { missingConcepts: [], ambiguousTerms: [], conflictingEvidence: [], unsupportedClaims: [] } },
+         goal: GOAL, traceActions: [], expectedAction: 'answer',
+         sourceQuery: 'deep learning',
+       },
+     ]);
+
+     const capturedObs = [];
+     const spyPolicy = {
+       resolve(assessment, goal, trace, observation) {
+         capturedObs.push(observation);
+         return Decision.create('answer', 'spy', {});
+       }
+     };
+
+     const harness = new ReplayHarness();
+     const report = await harness.run(spyPolicy, ds);
+
+     await a.assertEqual(report.total, 1, 'one fixture');
+     await a.assertEqual(capturedObs.length, 1, 'observation was passed to resolve');
+     await a.assertEqual(capturedObs[0].query, 'deep learning', 'observation has query from fixture');
+     await a.assertTrue(capturedObs[0] instanceof Observation, 'observation is an Observation instance');
+     fs.unlinkSync(file);
+   });
+
+   return runner;
+ }
 
 module.exports = { setupTests };

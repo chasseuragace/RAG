@@ -16,6 +16,11 @@ const { RetrievalJudge } = require('../src/agentic/judge');
 const { Observation } = require('../src/agentic/observation');
 const { RetrievalExecutor } = require('../src/agentic/executor');
 const { RetrievalObjectives } = require('../src/shared/interfaces');
+const { Thread, Message } = require('../src/shared/interfaces');
+const { TokenCounter } = require('../src/shared/token-counter');
+const { MessageSummarizer } = require('../src/shared/message-summarizer');
+const { ContextWindowManager } = require('../src/shared/context-window-manager');
+const { MockInference } = require('../src/inference/mock');
 
 function cosine(a, b) {
   let dot = 0, na = 0, nb = 0;
@@ -299,7 +304,89 @@ async function setupTests() {
     await a.assertEqual(r1[0].score, r2[0].score);
   });
 
-  return runner;
-}
+   // ── Coordinator._buildContext with threadManager + contextWindowManager ──
+
+   runner.test('Coordinator._buildContext attaches contextPayload when threadManager and contextWindowManager are set', async (a) => {
+     const tokenCounter = new TokenCounter();
+     await tokenCounter.init();
+     const summarizer = new MessageSummarizer(new MockInference());
+     const cwm = new ContextWindowManager({
+       tokenCounter,
+       summarizer,
+       modelContextWindow: 128000,
+       systemTokenBudget: 500,
+       responseTokenBudget: 1000,
+       minMessagesToKeep: 3,
+     });
+
+     const judge = new RetrievalJudge();
+     const policy = new HeuristicRetrievalPolicy();
+     const executor = new RetrievalExecutor(new MockEmbedder(), new HybridStore(new MockVectorStore(), new BM25Store()), new MockReranker());
+     const mockThreadManager = {
+       getOrCreate: async () => { const t = Thread.create('test-session-buildcontext'); t.messages = []; return t; },
+       addMessage: async () => {},
+       getThread: async () => { const t = Thread.create('test-session-buildcontext'); t.messages = []; return t; },
+     };
+     const coordinator = new Coordinator(judge, policy, executor, mockThreadManager, cwm);
+
+     const obs = Observation.create('what is RAG', 3);
+     obs.sessionId = 'test-session-buildcontext';
+
+     const result = await coordinator._buildContext(obs);
+     await a.assertTrue(result.contextPayload !== null, 'contextPayload is attached');
+     await a.assertTrue(Array.isArray(result.contextPayload.messages), 'contextPayload has messages');
+     await a.assertTrue(result.contextPayload.messages.length > 0, 'contextPayload has at least one message');
+   });
+
+   runner.test('Coordinator._buildContext returns obs unchanged when threadManager is null', async (a) => {
+     const judge = new RetrievalJudge();
+     const policy = new HeuristicRetrievalPolicy();
+     const executor = new RetrievalExecutor(new MockEmbedder(), new HybridStore(new MockVectorStore(), new BM25Store()), new MockReranker());
+     const coordinator = new Coordinator(judge, policy, executor, null, null);
+
+     const obs = Observation.create('what is RAG', 3);
+     obs.sessionId = 'test-session-no-thread-mgr';
+
+     const result = await coordinator._buildContext(obs);
+     await a.assertEqual(result.contextPayload, null, 'no contextPayload when threadManager is null');
+   });
+
+   runner.test('Coordinator._buildContext throws when sessionId is missing', async (a) => {
+     const tokenCounter = new TokenCounter();
+     await tokenCounter.init();
+     const summarizer = new MessageSummarizer(new MockInference());
+     const cwm = new ContextWindowManager({
+       tokenCounter,
+       summarizer,
+       modelContextWindow: 128000,
+       systemTokenBudget: 500,
+       responseTokenBudget: 1000,
+       minMessagesToKeep: 3,
+     });
+
+     const judge = new RetrievalJudge();
+     const policy = new HeuristicRetrievalPolicy();
+     const executor = new RetrievalExecutor(new MockEmbedder(), new HybridStore(new MockVectorStore(), new BM25Store()), new MockReranker());
+     const mockThreadManager = {
+       getOrCreate: async () => { const t = Thread.create('test-session-buildcontext'); t.messages = []; return t; },
+       addMessage: async () => {},
+       getThread: async () => { const t = Thread.create('test-session-buildcontext'); t.messages = []; return t; },
+     };
+     const coordinator = new Coordinator(judge, policy, executor, mockThreadManager, cwm);
+
+     const obs = Observation.create('what is RAG', 3);
+
+     let threw = false;
+     try {
+       await coordinator._buildContext(obs);
+     } catch (e) {
+       threw = true;
+       await a.assertEqual(e.message, 'Observation missing sessionId — cannot fetch thread');
+     }
+     await a.assertTrue(threw, 'throws when sessionId is missing');
+   });
+
+   return runner;
+ }
 
 module.exports = { setupTests };
