@@ -1,5 +1,10 @@
 /**
- * ConversationStore — one JSON file per session holding chat history for /ask.
+ * ConversationStore — DEPRECATED.
+ *
+ * @deprecated Use PostgresThreadManager via createThreadManager() instead.
+ * This flat-file JSON store has no token-aware context window management,
+ * no summarization, and no thread abstraction. Retained only for
+ * migration purposes; will be removed in a future release.
  */
 const fs = require('fs');
 const path = require('path');

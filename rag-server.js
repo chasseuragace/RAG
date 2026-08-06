@@ -15,7 +15,6 @@
 
 const { RAGServer } = require('./src/api/server');
 const { serverEvents } = require('./src/shared/events');
-const { ConversationStore } = require('./src/session/conversation');
 const { DocRegistry } = require('./src/ingestion/registry');
 const { chunkText } = require('./src/shared/chunker');
 const { setupTests: setupMockTests } = require('./tests/mock.test');
@@ -132,4 +131,4 @@ Environment variables:
 
 if (require.main === module) main().catch(e => { console.error(e); process.exit(1); });
 
-module.exports = { RAGServer, serverEvents, ConversationStore, DocRegistry, chunkText };
+module.exports = { RAGServer, serverEvents, DocRegistry, chunkText };

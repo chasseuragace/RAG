@@ -2,9 +2,9 @@ const { TestRunner } = require('./runner');
 const { TokenCounter } = require('../src/shared/token-counter');
 const { MessageSummarizer } = require('../src/shared/message-summarizer');
 const { ContextWindowManager } = require('../src/shared/context-window-manager');
-const { Thread, Message, ThreadManager } = require('../src/shared/interfaces');
-const { createThreadManager, LegacyThreadManagerAdapter } = require('../src/session/thread-manager-factory');
-const { ConversationStore } = require('../src/session/conversation');
+const { Thread, Message } = require('../src/shared/interfaces');
+const { createThreadManager } = require('../src/session/thread-manager-factory');
+const { PostgresThreadManager } = require('../src/session/postgres-thread-manager');
 
 async function setupTests() {
   const runner = new TestRunner();
@@ -67,58 +67,11 @@ async function setupTests() {
     await a.assertEqual(msg.metadata.tokens, 50, 'metadata preserved');
   });
 
-  // ── LegacyThreadManagerAdapter ──
-
-  runner.test('LegacyThreadManagerAdapter.getOrCreate() returns Thread-like object', async (a) => {
-    const adapter = new LegacyThreadManagerAdapter();
-    const thread = await adapter.getOrCreate('test-session');
-    await a.assertEqual(thread.id, 'test-session', 'thread id matches');
-    await a.assertEqual(Array.isArray(thread.messages), true, 'messages is array');
-    await a.assertEqual(thread.summary, null, 'no summary in legacy');
-  });
-
-  runner.test('LegacyThreadManagerAdapter.addMessage() stores message', async (a) => {
-    const adapter = new LegacyThreadManagerAdapter();
-    const sessionId = `test-session-addmsg-${Date.now()}`;
-    const msg = Message.create('user', 'test message');
-    await adapter.addMessage(sessionId, msg);
-    const thread = await adapter.getThread(sessionId);
-    await a.assertEqual(thread.messages.length, 1, '1 message stored');
-    await a.assertEqual(thread.messages[0].role, 'user', 'role preserved');
-    await a.assertEqual(thread.messages[0].content, 'test message', 'content preserved');
-  });
-
-  runner.test('LegacyThreadManagerAdapter.updateSummary() is a no-op', async (a) => {
-    const adapter = new LegacyThreadManagerAdapter();
-    await adapter.updateSummary('test-session', 'summary text', 5);
-    const thread = await adapter.getThread('test-session');
-    await a.assertEqual(thread.summary, null, 'summary not stored in legacy');
-  });
-
-  runner.test('LegacyThreadManagerAdapter.listThreads() returns empty array', async (a) => {
-    const adapter = new LegacyThreadManagerAdapter();
-    const threads = await adapter.listThreads();
-    await a.assertEqual(Array.isArray(threads), true, 'returns array');
-    await a.assertEqual(threads.length, 0, 'empty array for legacy');
-  });
-
   // ── ThreadManagerFactory ──
 
-  runner.test('createThreadManager() returns LegacyThreadManagerAdapter by default', async (a) => {
+  runner.test('createThreadManager() returns PostgresThreadManager', async (a) => {
     const mgr = createThreadManager();
-    await a.assertEqual(mgr.constructor.name, 'LegacyThreadManagerAdapter', 'returns legacy adapter by default');
-  });
-
-  runner.test('createThreadManager() returns PostgresThreadManager when USE_NEW_CONTEXT=true', async (a) => {
-    const original = process.env.USE_NEW_CONTEXT;
-    process.env.USE_NEW_CONTEXT = 'true';
-    try {
-      const { createThreadManager: createTM } = require('../src/session/thread-manager-factory');
-      const mgr = createTM();
-      await a.assertEqual(mgr.constructor.name, 'PostgresThreadManager', 'returns PostgresThreadManager');
-    } finally {
-      process.env.USE_NEW_CONTEXT = original;
-    }
+    await a.assertEqual(mgr.constructor.name, 'PostgresThreadManager', 'returns PostgresThreadManager');
   });
 
   // ── ContextWindowManager ──
@@ -232,11 +185,11 @@ async function setupTests() {
   // ── ThreadManager interface ──
 
   runner.test('ThreadManager has required methods', async (a) => {
-    await a.assertEqual(typeof ThreadManager.prototype.getOrCreate, 'function', 'has getOrCreate');
-    await a.assertEqual(typeof ThreadManager.prototype.addMessage, 'function', 'has addMessage');
-    await a.assertEqual(typeof ThreadManager.prototype.getThread, 'function', 'has getThread');
-    await a.assertEqual(typeof ThreadManager.prototype.updateSummary, 'function', 'has updateSummary');
-    await a.assertEqual(typeof ThreadManager.prototype.listThreads, 'function', 'has listThreads');
+    await a.assertEqual(typeof PostgresThreadManager.prototype.getOrCreate, 'function', 'has getOrCreate');
+    await a.assertEqual(typeof PostgresThreadManager.prototype.addMessage, 'function', 'has addMessage');
+    await a.assertEqual(typeof PostgresThreadManager.prototype.getThread, 'function', 'has getThread');
+    await a.assertEqual(typeof PostgresThreadManager.prototype.updateSummary, 'function', 'has updateSummary');
+    await a.assertEqual(typeof PostgresThreadManager.prototype.listThreads, 'function', 'has listThreads');
   });
 
   return runner;

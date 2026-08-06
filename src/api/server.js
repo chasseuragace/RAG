@@ -6,9 +6,8 @@ const fs = require('fs');
 const path = require('path');
 const http = require('http');
 
-const { INPUT_DIR, CHUNK_SIZE, CHUNK_OVERLAP, CONVERSATIONS_DIR, EXPERT_MODE, NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD, PG_CONNECTION_STRING, MODEL_CONTEXT_WINDOW, SYSTEM_TOKEN_BUDGET, RESPONSE_MAX_TOKENS, MIN_MESSAGES_TO_KEEP, SUMMARY_MAX_TOKENS, BASE_SYSTEM_PROMPT, USE_NEW_CONTEXT } = require('../shared/config');
+const { INPUT_DIR, CHUNK_SIZE, CHUNK_OVERLAP, CONVERSATIONS_DIR, EXPERT_MODE, NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD, PG_CONNECTION_STRING, MODEL_CONTEXT_WINDOW, SYSTEM_TOKEN_BUDGET, RESPONSE_MAX_TOKENS, MIN_MESSAGES_TO_KEEP, SUMMARY_MAX_TOKENS, BASE_SYSTEM_PROMPT } = require('../shared/config');
 const { serverEvents } = require('../shared/events');
-const { ConversationStore } = require('../session/conversation');
 const { DocRegistry } = require('../ingestion/registry');
 const { GoldenDataset } = require('../evaluation/golden-dataset');
 const { MockDocumentLoader } = require('../ingestion/loaders/mock');
@@ -211,23 +210,21 @@ await this.injectionPipeline.run('/mock', this.registry);
        //       Real mode returns immediately — the heavy lifting happens on /inject requests.
      }
 
-     // ── Context-aware chat (feature-flagged) ──
-     if (USE_NEW_CONTEXT) {
-       this.threadManager = createThreadManager();
-       const tokenCounter = new TokenCounter();
-       await tokenCounter.init();
-       const summarizer = new MessageSummarizer(this.inference);
-       this.contextWindowManager = new ContextWindowManager({
-         tokenCounter,
-         summarizer,
-         threadManager: this.threadManager,
-         modelContextWindow: MODEL_CONTEXT_WINDOW,
-         systemTokenBudget: SYSTEM_TOKEN_BUDGET,
-         responseTokenBudget: RESPONSE_MAX_TOKENS,
-         minMessagesToKeep: MIN_MESSAGES_TO_KEEP,
-       });
-     }
-   }
+// ── Context-aware chat ──
+    this.threadManager = createThreadManager();
+    const tokenCounter = new TokenCounter();
+    await tokenCounter.init();
+    const summarizer = new MessageSummarizer(this.inference);
+    this.contextWindowManager = new ContextWindowManager({
+      tokenCounter,
+      summarizer,
+      threadManager: this.threadManager,
+      modelContextWindow: MODEL_CONTEXT_WINDOW,
+      systemTokenBudget: SYSTEM_TOKEN_BUDGET,
+      responseTokenBudget: RESPONSE_MAX_TOKENS,
+      minMessagesToKeep: MIN_MESSAGES_TO_KEEP,
+    });
+    }
 
   setupWebSocket() {
     if (!WebSocketServer) return;
@@ -301,32 +298,19 @@ await this.injectionPipeline.run('/mock', this.registry);
         }));
 
         let answer;
-        if (this.threadManager && this.contextWindowManager) {
-          // ── New context-aware path ──
-          const thread = await this.threadManager.getOrCreate(sessionId);
-          const userMsg = Message.create('user', payload.query);
-          await this.threadManager.addMessage(sessionId, userMsg);
-          const updatedThread = await this.threadManager.getThread(sessionId);
-          const contextPayload = await this.contextWindowManager.buildContext(
-            updatedThread,
-            BASE_SYSTEM_PROMPT,
-            contextDocs,
-            RESPONSE_MAX_TOKENS
-          );
-          answer = await this.inference.generateChat(contextPayload.messages);
-          const assistantMsg = Message.create('assistant', answer);
-          await this.threadManager.addMessage(sessionId, assistantMsg);
-        } else {
-          // ── Legacy naive path ──
-          const conv = ConversationStore.getOrCreate(sessionId);
-          const history = conv.getHistory(10);
-          answer = await this.inference.generateAnswer(
-            payload.query, contextDocs, history,
-            { fusedContext: graphRagResult.combinedContext }
-          );
-          conv.addMessage('user', payload.query);
-          conv.addMessage('assistant', answer);
-        }
+        const thread = await this.threadManager.getOrCreate(sessionId);
+        const userMsg = Message.create('user', payload.query);
+        await this.threadManager.addMessage(sessionId, userMsg);
+        const updatedThread = await this.threadManager.getThread(sessionId);
+        const contextPayload = await this.contextWindowManager.buildContext(
+          updatedThread,
+          BASE_SYSTEM_PROMPT,
+          contextDocs,
+          RESPONSE_MAX_TOKENS
+        );
+        answer = await this.inference.generateChat(contextPayload.messages);
+        const assistantMsg = Message.create('assistant', answer);
+        await this.threadManager.addMessage(sessionId, assistantMsg);
 
         ws.send(JSON.stringify({
           type: 'ask:result',
@@ -486,9 +470,7 @@ await this.injectionPipeline.run('/mock', this.registry);
           }));
 
           let answer;
-          if (this.threadManager && this.contextWindowManager) {
-            // ── New context-aware path ──
-            const thread = await this.threadManager.getOrCreate(sid);
+          const thread = await this.threadManager.getOrCreate(sid);
             const userMsg = Message.create('user', query);
             await this.threadManager.addMessage(sid, userMsg);
             const updatedThread = await this.threadManager.getThread(sid);
@@ -501,17 +483,6 @@ await this.injectionPipeline.run('/mock', this.registry);
             answer = await this.inference.generateChat(contextPayload.messages);
             const assistantMsg = Message.create('assistant', answer);
             await this.threadManager.addMessage(sid, assistantMsg);
-          } else {
-            // ── Legacy naive path ──
-            const conv = ConversationStore.getOrCreate(sid);
-            const history = conv.getHistory(10);
-            answer = await this.inference.generateAnswer(
-              query, contextDocs, history,
-              { fusedContext: graphRagResult.combinedContext }
-            );
-            conv.addMessage('user', query);
-            conv.addMessage('assistant', answer);
-          }
 
           res.writeHead(200);
           res.end(JSON.stringify({
