@@ -6,7 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const http = require('http');
 
-const { INPUT_DIR, CHUNK_SIZE, CHUNK_OVERLAP, CONVERSATIONS_DIR, EXPERT_MODE } = require('../shared/config');
+const { INPUT_DIR, CHUNK_SIZE, CHUNK_OVERLAP, CONVERSATIONS_DIR, EXPERT_MODE, NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD, PG_CONNECTION_STRING } = require('../shared/config');
 const { serverEvents } = require('../shared/events');
 const { ConversationStore } = require('../session/conversation');
 const { DocRegistry } = require('../ingestion/registry');
@@ -15,7 +15,6 @@ const { MockDocumentLoader } = require('../ingestion/loaders/mock');
 const { RealDocumentLoader } = require('../ingestion/loaders/real');
 const { MockEmbedder } = require('../retrieval/embedders/mock');
 const { GeminiEmbedder } = require('../retrieval/embedders/gemini');
-const { MockVectorStore } = require('../retrieval/stores/mock');
 const { ChromaVectorStore } = require('../retrieval/stores/chroma');
 const { BM25Store } = require('../retrieval/stores/bm25');
 const { HybridStore } = require('../retrieval/stores/hybrid');
@@ -32,9 +31,9 @@ const { GraphRAGPipeline } = require('../retrieval/graph-rag');
 const { RetrievalObjectives } = require('../shared/interfaces');
 // NER / graph components
 const { MockEntityExtractor } = require('../retrieval/ner/mock-extractor');
-const { MockAcronymGlossary } = require('../retrieval/ner/mock-glossary');
+const { PostgresAcronymGlossary } = require('../retrieval/ner/glossary');
 const { MockMetadataFilter } = require('../retrieval/ner/mock-filter');
-const { MockGraphStore } = require('../ingestion/graph/mock-store');
+const { Neo4jGraphStore } = require('../ingestion/graph/store');
 const { MockRelationshipExtractor } = require('../ingestion/graph/mock-extractor');
 const { MockContextFuser } = require('../retrieval/graph/mock-fuser');
 // Authority components
@@ -81,10 +80,10 @@ class RAGServer {
 
     // ── Shared NER / graph / authority components (same interfaces for both modes) ──
     const ner          = new MockEntityExtractor();
-    const glossary     = new MockAcronymGlossary();
+    const glossary     = new PostgresAcronymGlossary(PG_CONNECTION_STRING);
     const filter       = new MockMetadataFilter();
     const relExtractor = new MockRelationshipExtractor();
-    const graphStore   = new MockGraphStore();
+    const graphStore   = new Neo4jGraphStore(NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD);
     const fuser        = new MockContextFuser();
     const annotator    = new MockProvenanceAnnotator();
     const scorer       = new StaticDictionaryScorer();
@@ -120,6 +119,8 @@ class RAGServer {
       );
 
       // Graph-RAG: dual-path parallel retrieval + context fusion + authority-aware rerank
+      // @gotcha `graphDepth: 1` → `maxDepth = 0` in queryByEntity, meaning NO path expansion.
+      //       Use depth >= 2 to enable neighbor traversal via apoc.path.expand.
       this.graphRagPipeline = new GraphRAGPipeline(
         embedder, hybrid, graphStore,
         { ner, glossary, filter, fuser, reranker, graphDepth: 1, candidateK: 20 }
@@ -132,7 +133,7 @@ class RAGServer {
 
     } else {
       const embedder  = new MockEmbedder();
-      const store     = new MockVectorStore();
+      const store     = new ChromaVectorStore();
       const bm25      = new BM25Store();
       const hybrid    = new HybridStore(store, bm25);
       const loader    = new MockDocumentLoader();
@@ -157,6 +158,8 @@ class RAGServer {
       );
 
       // Graph-RAG: dual-path parallel retrieval + context fusion + authority-aware rerank
+      // @gotcha `graphDepth: 1` → `maxDepth = 0` in queryByEntity, meaning NO path expansion.
+      //       Use depth >= 2 to enable neighbor traversal via apoc.path.expand.
       this.graphRagPipeline = new GraphRAGPipeline(
         embedder, hybrid, graphStore,
         { ner, glossary, filter, fuser, reranker, graphDepth: 1, candidateK: 20 }
@@ -168,6 +171,8 @@ class RAGServer {
       this.reranker   = reranker;
 
       await this.injectionPipeline.run('/mock', this.registry);
+      // @gotcha Mock mode blocks here until the full mock injection completes.
+      //       Real mode returns immediately — the heavy lifting happens on /inject requests.
     }
   }
 
@@ -230,6 +235,7 @@ class RAGServer {
         break;
       case 'request:ask':
         const sessionId = payload.sessionId || `anon_${Date.now()}_${Math.random().toString(36).substr(2, 8)}`;
+        // @gotcha `String.prototype.substr` is deprecated. Use `substring(2, 10)` instead.
         const conv = ConversationStore.getOrCreate(sessionId);
         const history = conv.getHistory(10);
         const topK = payload.topK || 3;
@@ -394,6 +400,7 @@ class RAGServer {
         try {
           const { query, sessionId, topK = 3 } = JSON.parse(body);
           const sid  = sessionId || `http_${Date.now()}_${Math.random().toString(36).substr(2, 8)}`;
+          // @gotcha `String.prototype.substr` is deprecated. Use `substring(2, 10)` instead.
           const conv = ConversationStore.getOrCreate(sid);
           const history = conv.getHistory(10);
 
@@ -477,6 +484,8 @@ class RAGServer {
 
   // After a full clear/inject the store no longer matches the registry, so wipe
   // it. The next incremental run then treats every file as newly added.
+  // @gotcha Calling /clear before /inject-incremental forces a full re-embed of
+  //       the entire corpus, defeating the purpose of incremental sync.
   _resetRegistry() {
     if (!this.registry) return;
     this.registry.docs = {};

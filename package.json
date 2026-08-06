@@ -3,6 +3,8 @@
   "version": "1.0.0",
   "description": "RAG (Retrieval-Augmented Generation) System - Phase 1 POC with zero dependencies",
   "main": "rag-server.js",
+  // @gotcha `main` points to `rag-server.js` (project root), not `src/api/server.js`.
+  //       `rag-server.js` is the CLI entry that bootstraps and delegates to RAGServer.
   "type": "commonjs",
   "scripts": {
     "test": "node rag-server.js --test",
@@ -32,6 +34,8 @@
     "url": "https://github.com/yourusername/rag-system"
   },
   "dependencies": {
-    "ws": "8.21.1"
+    "neo4j-driver": "^5.28.3",
+    "pg": "^8.22.0",
+    "ws": "^8.21.1"
   }
 }

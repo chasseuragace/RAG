@@ -95,7 +95,7 @@ class NEREnrichedRetrievalPipeline {
 
     try {
       // ── Step 1: Acronym expansion ──────────────────────────────────────────
-      const expandedQuery = this.glossary ? this.glossary.expand(query) : query;
+      const expandedQuery = this.glossary ? await this.glossary.expand(query) : query;
       if (expandedQuery !== query) {
         serverEvents.logEvent('retrieval:ner:expanded', { original: query, expanded: expandedQuery });
       }
@@ -114,6 +114,8 @@ class NEREnrichedRetrievalPipeline {
 
       // ── Step 4: Hybrid retrieval (dense + sparse) ──────────────────────────
       // Fetch a larger candidate pool so the filter has material to work with.
+      // @gotcha Hardcoded 4x multiplier — tune with care; too low and the filter
+      //       starves, too high and latency climbs.
       const candidateK = topK * 4;
       const qEmb = await this.embedder.embed(expandedQuery);
       serverEvents.logEvent('retrieval:ner:query-embedded', {});
@@ -131,6 +133,8 @@ class NEREnrichedRetrievalPipeline {
       });
 
       // Fall back to unfiltered results if the filter is too aggressive.
+      // @gotcha This is silent — the caller gets unfiltered results with no warning
+      //       when the metadata filter removes every candidate.
       const pool = filtered.length > 0 ? filtered : candidates;
 
       // ── Step 5: Rerank & trim ──────────────────────────────────────────────

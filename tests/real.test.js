@@ -1,12 +1,32 @@
 /**
- * Real integration tests — require live Gemini, Chroma, and Novita.
+ * Real integration tests — require live Gemini, Chroma, Novita, Neo4j, and PostgreSQL.
  * Run with `node rag-server.js --real-test` and the relevant API keys set.
+ * Neo4j and PostgreSQL must be running (e.g. via `docker-compose up`).
  */
 const { TestRunner } = require('./runner');
 const { RealDocumentLoader } = require('../src/ingestion/loaders/real');
 const { GeminiEmbedder } = require('../src/retrieval/embedders/gemini');
 const { ChromaVectorStore } = require('../src/retrieval/stores/chroma');
 const { NovitaInference } = require('../src/inference/novita');
+const { Neo4jGraphStore } = require('../src/ingestion/graph/store');
+const { PostgresAcronymGlossary } = require('../src/retrieval/ner/glossary');
+const { MockEntityExtractor } = require('../src/retrieval/ner/mock-extractor');
+const { MockMetadataFilter } = require('../src/retrieval/ner/mock-filter');
+const { MockRelationshipExtractor } = require('../src/ingestion/graph/mock-extractor');
+const { MockProvenanceAnnotator } = require('../src/ingestion/authority/mock-annotator');
+const { StaticDictionaryScorer } = require('../src/retrieval/authority/mock-scorer');
+const { MockContextFuser } = require('../src/retrieval/graph/mock-fuser');
+const { NEREnrichedRetrievalPipeline } = require('../src/retrieval/pipeline');
+const { ConcreteInjectionPipeline } = require('../src/ingestion/pipeline');
+const { MockEmbedder } = require('../src/retrieval/embedders/mock');
+const { MockVectorStore } = require('../src/retrieval/stores/mock');
+const { MockDocumentLoader } = require('../src/ingestion/loaders/mock');
+const { HybridStore } = require('../src/retrieval/stores/hybrid');
+const { BM25Store } = require('../src/retrieval/stores/bm25');
+const { RetrievalObjectives } = require('../src/shared/interfaces');
+const { MockReranker } = require('../src/retrieval/rerankers/mock');
+const { AuthorityAwareReranker } = require('../src/retrieval/rerankers/authority-aware');
+const { MockInference } = require('../src/inference/mock');
 
 async function setupRealTests() {
   const runner = new TestRunner();
@@ -30,7 +50,7 @@ async function setupRealTests() {
   // Test 3: ChromaVectorStore connectivity & reset
   runner.test('ChromaVectorStore should connect, store, and query', async (assert) => {
     const store = new ChromaVectorStore();
-    await store.clear(); // Clear database
+    await store.clear();
 
     const embedder = new GeminiEmbedder();
     const text = 'Node.js is built on Chrome V8 engine';
@@ -64,6 +84,115 @@ async function setupRealTests() {
 
     const answer = await inference.generateAnswer('What engine is Node.js built on?', context);
     await assert.assertTrue(answer.toLowerCase().includes('v8') || answer.toLowerCase().includes('chrome'), 'Answer should mention V8 engine');
+  });
+
+  // Test 5: Neo4jGraphStore store and query
+  runner.test('Neo4jGraphStore should store triples and query by entity', async (assert) => {
+    const store = new Neo4jGraphStore();
+    await store.clear();
+
+    await store.storeTriple({ subject: 'AZT', predicate: 'TREATS', object: 'HIV', confidence: 0.85 });
+    await store.storeTriple({ subject: 'HIV', predicate: 'CAUSES', object: 'AIDS', confidence: 0.80 });
+
+    const stats = await store.getStats();
+    await assert.assertEqual(stats.tripleCount, 2, 'Should have 2 triples');
+    await assert.assertEqual(stats.entityCount, 3, 'Should have 3 entities');
+
+    const results = await store.queryByEntity('AZT', 1);
+    // @gotcha depth=1 → maxDepth=0, so only direct neighbors are returned.
+    //       This is correct here: AZT→HIV is a direct edge.
+    await assert.assertEqual(results.length, 1, 'Should find 1 triple for AZT');
+    await assert.assertEqual(results[0].predicate, 'TREATS', 'Should be TREATS predicate');
+    await assert.assertEqual(results[0].object, 'hiv', 'Should point to HIV');
+
+    await store.clear();
+  });
+
+  // Test 6: Neo4jGraphStore queryByEntities
+  runner.test('Neo4jGraphStore should query multiple entities', async (assert) => {
+    const store = new Neo4jGraphStore();
+    await store.clear();
+
+    await store.storeTriple({ subject: 'AZT', predicate: 'TREATS', object: 'HIV', confidence: 0.85 });
+    await store.storeTriple({ subject: 'HIV', predicate: 'CAUSES', object: 'AIDS', confidence: 0.80 });
+
+    const results = await store.queryByEntities(['AZT', 'HIV'], 2);
+    await assert.assertTrue(results.length >= 2, 'Should find at least 2 triples');
+
+    await store.clear();
+  });
+
+  // Test 7: PostgresAcronymGlossary lookup and expand
+  runner.test('PostgresAcronymGlossary should store and lookup acronyms', async (assert) => {
+    const glossary = new PostgresAcronymGlossary();
+    await glossary.register({ AZT: ['Zidovudine'], HIV: ['Human Immunodeficiency Virus'] });
+
+    const expansions = await glossary.lookup('AZT');
+    await assert.assertEqual(expansions.length, 1, 'Should have 1 expansion for AZT');
+    await assert.assertEqual(expansions[0], 'Zidovudine', 'Should expand AZT to Zidovudine');
+
+    const text = 'AZT efficacy HIV low CD4';
+    const expanded = await glossary.expand(text);
+    await assert.assertTrue(expanded.includes('AZT OR Zidovudine'), 'Should expand AZT in text');
+    await assert.assertTrue(expanded.includes('HIV OR Human Immunodeficiency Virus'), 'Should expand HIV in text');
+  });
+
+  // Test 8: PostgresAcronymGlossary returns empty for unknown
+  runner.test('PostgresAcronymGlossary should return empty for unknown acronym', async (assert) => {
+    const glossary = new PostgresAcronymGlossary();
+    const expansions = await glossary.lookup('XYZ');
+    await assert.assertEqual(expansions.length, 0, 'Should return empty array for unknown acronym');
+  });
+
+  // Test 9: Real pipeline with Neo4j + Postgres glossary
+  runner.test('NEREnrichedRetrievalPipeline should work with Neo4j and Postgres glossary', async (assert) => {
+    const embedder = new MockEmbedder();
+    const store = new MockVectorStore();
+    const bm25 = new BM25Store();
+    const hybrid = new HybridStore(store, bm25);
+    const ner = new MockEntityExtractor();
+    const glossary = new PostgresAcronymGlossary();
+    const filter = new MockMetadataFilter();
+    const reranker = new MockReranker();
+
+    const pipeline = new NEREnrichedRetrievalPipeline(
+      embedder, hybrid, { ner, glossary, filter, reranker }
+    );
+
+    await glossary.register({ HIV: ['Human Immunodeficiency Virus'], AZT: ['Zidovudine'] });
+
+    const docEmbedding = await embedder.embed('HIV treatment with antiretroviral drugs');
+    await hybrid.store('doc-1', docEmbedding, { original_id: 'doc-1', content: 'HIV treatment with antiretroviral drugs', entities: { DISEASE: ['hiv'], DRUG: ['azt'] } });
+
+    const result = await pipeline.run('HIV treatment', 3);
+    await assert.assertEqual(result.success, true, 'Pipeline should succeed');
+    await assert.assertTrue(Array.isArray(result.results), 'Should return results array');
+  });
+
+  // Test 10: Real injection pipeline with Neo4j
+  runner.test('ConcreteInjectionPipeline should work with Neo4jGraphStore', async (assert) => {
+    const loader = new MockDocumentLoader();
+    const embedder = new MockEmbedder();
+    const store = new MockVectorStore();
+    const bm25 = new BM25Store();
+    const hybrid = new HybridStore(store, bm25);
+    const ner = new MockEntityExtractor();
+    const relExtractor = new MockRelationshipExtractor();
+    const graphStore = new Neo4jGraphStore();
+    const annotator = new MockProvenanceAnnotator();
+
+    const pipeline = new ConcreteInjectionPipeline(
+      loader, embedder, hybrid, ner, relExtractor, graphStore, annotator
+    );
+
+    const registry = new (require('../src/ingestion/registry').DocRegistry)();
+    const result = await pipeline.run('./examples', registry);
+    await assert.assertEqual(result.success, true, 'Injection should succeed');
+
+    const stats = await graphStore.getStats();
+    await assert.assertTrue(stats.tripleCount >= 0, 'Should have non-negative triple count');
+
+    await graphStore.clear();
   });
 
   return runner;

@@ -6,14 +6,22 @@ const fs = require('fs');
 const path = require('path');
 
 const INPUT_DIR = process.env.RAG_INPUT_DIR || './input';
-const CHUNK_SIZE = parseInt(process.env.RAG_CHUNK_SIZE) || 1000;      // characters
+// @gotcha `parseInt(env) || default` treats `0` as falsy, so RAG_CHUNK_SIZE=0
+//       silently falls back to 1000. Use a sentinel check if 0 is meaningful.
+const CHUNK_SIZE = parseInt(process.env.RAG_CHUNK_SIZE) || 1000;
 const CHUNK_OVERLAP = parseInt(process.env.RAG_CHUNK_OVERLAP) || 200;
 const CONVERSATIONS_DIR = './conversations';
 const REGISTRY_FILE = process.env.RAG_REGISTRY_FILE || './data/doc-registry.json';
 const GOLDEN_DATASET_FILE = process.env.RAG_GOLDEN_DATASET_FILE || './data/golden-decisions.json';
 
+const NEO4J_URI = process.env.RAG_NEO4J_URI || 'bolt://localhost:7687';
+const NEO4J_USER = process.env.RAG_NEO4J_USER || 'neo4j';
+const NEO4J_PASSWORD = process.env.RAG_NEO4J_PASSWORD || 'neo4j_password';
+const PG_CONNECTION_STRING = process.env.RAG_PG_CONNECTION_STRING || 'postgresql://rag_user:rag_password@localhost:5432/rag_system';
+
 // Expert mode enables advanced UI panels (capture fixture, replay harness).
-// On by default — set RAG_EXPERT_MODE=false to hide them in production.
+// @gotcha Enabled by default — only disabled when explicitly set to the string "false".
+//       Empty string, "0", "no", etc. all enable it.
 const EXPERT_MODE = process.env.RAG_EXPERT_MODE !== 'false';
 
 // Ensure directories exist
@@ -21,4 +29,4 @@ if (!fs.existsSync(INPUT_DIR)) fs.mkdirSync(INPUT_DIR, { recursive: true });
 if (!fs.existsSync(CONVERSATIONS_DIR)) fs.mkdirSync(CONVERSATIONS_DIR, { recursive: true });
 if (!fs.existsSync(path.dirname(REGISTRY_FILE))) fs.mkdirSync(path.dirname(REGISTRY_FILE), { recursive: true });
 
-module.exports = { INPUT_DIR, CHUNK_SIZE, CHUNK_OVERLAP, CONVERSATIONS_DIR, REGISTRY_FILE, GOLDEN_DATASET_FILE, EXPERT_MODE };
+module.exports = { INPUT_DIR, CHUNK_SIZE, CHUNK_OVERLAP, CONVERSATIONS_DIR, REGISTRY_FILE, GOLDEN_DATASET_FILE, EXPERT_MODE, NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD, PG_CONNECTION_STRING };
