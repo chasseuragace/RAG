@@ -41,6 +41,7 @@ class MockGraphStore extends GraphStore {
       object:        triple.object,
       confidence:    triple.confidence  ?? 1.0,
       sourceChunkId: triple.sourceChunkId ?? null,
+      documentId:    triple.documentId ?? null,
       metadata:      triple.metadata   ?? {},
     });
     this._addToIndex(triple.subject, idx);
@@ -50,9 +51,12 @@ class MockGraphStore extends GraphStore {
   /**
    * Store multiple triples at once.
    * @param {object[]} triples
+   * @param {string} [documentId] - Optional document ID attached to every triple
    */
-  async storeTriples(triples) {
-    for (const t of triples) await this.storeTriple(t);
+  async storeTriples(triples, documentId = null) {
+    for (const t of triples) {
+      await this.storeTriple({ ...t, documentId: t.documentId ?? documentId });
+    }
   }
 
   // ── Read ───────────────────────────────────────────────────────────────────
@@ -100,12 +104,20 @@ class MockGraphStore extends GraphStore {
    * Query for all entities at once, returning the union of their reachable triples.
    * @param {string[]} entityNames
    * @param {number}   [depth=1]
+   * @param {number}   [maxConcurrent=5]
    * @returns {Promise<object[]>}
    */
-  async queryByEntities(entityNames, depth = 1) {
+  async queryByEntities(entityNames, depth = 1, maxConcurrent = 5) {
     if (!entityNames || entityNames.length === 0) return [];
-    const sets = await Promise.all(entityNames.map(e => this.queryByEntity(e, depth)));
-    // De-duplicate by (subject+predicate+object) key
+    const batches = [];
+    for (let i = 0; i < entityNames.length; i += maxConcurrent) {
+      batches.push(entityNames.slice(i, i + maxConcurrent));
+    }
+    const sets = [];
+    for (const batch of batches) {
+      const batchResults = await Promise.all(batch.map(e => this.queryByEntity(e, depth)));
+      sets.push(...batchResults);
+    }
     const seen = new Map();
     for (const batch of sets) {
       for (const t of batch) {
@@ -121,6 +133,24 @@ class MockGraphStore extends GraphStore {
     this._byEntity = new Map();
   }
 
+  async deleteByDocId(docId) {
+    const prefix = `${docId}_chunk_`;
+    let removed = 0;
+    this._triples = this._triples.filter(t => {
+      if ((t.sourceChunkId || '').startsWith(prefix)) {
+        removed++;
+        return false;
+      }
+      return true;
+    });
+    this._byEntity = new Map();
+    for (let i = 0; i < this._triples.length; i++) {
+      this._addToIndex(this._triples[i].subject, i);
+      this._addToIndex(this._triples[i].object, i);
+    }
+    return { deletedCount: removed };
+  }
+
   async getStats() {
     const entities = new Set();
     for (const t of this._triples) {
@@ -128,6 +158,22 @@ class MockGraphStore extends GraphStore {
       entities.add(this._norm(t.object));
     }
     return { tripleCount: this._triples.length, entityCount: entities.size };
+  }
+
+  /**
+   * Atomically replace all triples for a document: delete old + insert new.
+   * @param {string} docId
+   * @param {Array} triples
+   * @returns {Promise<{ deletedCount: number, insertedCount: number }>}
+   */
+  async replaceTriplesForDoc(docId, triples = []) {
+    const prefix = `${docId}_chunk_`;
+    const deleted = this._triples.filter(t => (t.sourceChunkId || '').startsWith(prefix)).length;
+    this._triples = this._triples.filter(t => !(t.sourceChunkId || '').startsWith(prefix));
+    for (const t of triples) {
+      await this.storeTriple({ ...t, documentId: docId });
+    }
+    return { deletedCount: deleted, insertedCount: triples.length };
   }
 
   // ── Internal ───────────────────────────────────────────────────────────────

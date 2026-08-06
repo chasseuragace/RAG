@@ -47,7 +47,7 @@ const DEFAULT_DOMAIN_SCORES = {
   'uptodate.com':          0.80,
   'medscape.com':          0.65,
   // Preprints / blogs / unknown
-  'unknown':               0.30,
+  'unknown':               0.50,
 };
 
 /**
@@ -65,7 +65,7 @@ const DEFAULT_DOCTYPE_SCORES = {
   'editorial':      0.35,
   'patent':         0.30,
   'preprint':       0.25,
-  'unknown':        0.30,
+  'unknown':        0.50,
 };
 
 const CURRENT_YEAR = new Date().getFullYear();
@@ -152,7 +152,7 @@ class StaticDictionaryScorer extends AuthorityScorer {
    * → score ≈ 0.0 for very old documents
    */
   _scoreRecency(publicationYear) {
-    if (!publicationYear || !Number.isFinite(publicationYear)) return 0.5; // neutral
+    if (!publicationYear || !Number.isFinite(publicationYear)) return 1.0; // neutral
     const age = Math.max(0, CURRENT_YEAR - publicationYear);
     return Math.pow(0.5, age / this._recencyHalfLife);
   }

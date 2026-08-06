@@ -22,6 +22,7 @@ class Neo4jGraphStore extends GraphStore {
    * @param {string} triple.object - Object entity name (case-insensitive, normalized to lowercase)
    * @param {number} [triple.confidence=1.0] - Confidence score; note that 0 is preserved (not treated as missing)
    * @param {string} [triple.sourceChunkId=null] - Origin chunk ID for provenance
+   * @param {string} [triple.documentId=null] - Origin document ID for efficient cleanup
    * @throws {Error} If subject, predicate, or object are missing
    */
   async storeTriple(triple) {
@@ -33,13 +34,14 @@ class Neo4jGraphStore extends GraphStore {
       await session.run(
         `MERGE (s:Entity {name: $subject})
          MERGE (o:Entity {name: $object})
-         CREATE (s)-[:RELATION {predicate: $predicate, confidence: $confidence, sourceChunkId: $sourceChunkId}]->(o)`,
+         CREATE (s)-[:RELATION {predicate: $predicate, confidence: $confidence, sourceChunkId: $sourceChunkId, documentId: $documentId}]->(o)`,
         {
           subject: triple.subject.toLowerCase(),
           object: triple.object.toLowerCase(),
           predicate: triple.predicate,
           confidence: triple.confidence ?? 1.0,
           sourceChunkId: triple.sourceChunkId ?? null,
+          documentId: triple.documentId ?? null,
         }
       );
     } finally {
@@ -50,11 +52,12 @@ class Neo4jGraphStore extends GraphStore {
   /**
    * Store multiple triples in a single transaction.
    * @param {Array} triples - Array of triple objects (same shape as storeTriple)
+   * @param {string} [documentId] - Optional document ID attached to every triple
    * @throws {Error} Database errors are rolled back and re-thrown
    * @note Unlike storeTriple, this does NOT validate required fields — invalid triples
    *       will cause a database error and rollback the entire batch.
    */
-  async storeTriples(triples) {
+  async storeTriples(triples, documentId = null) {
     const session = this._driver.session();
     try {
       const tx = await session.beginTransaction();
@@ -63,13 +66,14 @@ class Neo4jGraphStore extends GraphStore {
           await tx.run(
             `MERGE (s:Entity {name: $subject})
              MERGE (o:Entity {name: $object})
-             CREATE (s)-[:RELATION {predicate: $predicate, confidence: $confidence, sourceChunkId: $sourceChunkId}]->(o)`,
+             CREATE (s)-[:RELATION {predicate: $predicate, confidence: $confidence, sourceChunkId: $sourceChunkId, documentId: $documentId}]->(o)`,
             {
               subject: t.subject.toLowerCase(),
               object: t.object.toLowerCase(),
               predicate: t.predicate,
               confidence: t.confidence ?? 1.0,
               sourceChunkId: t.sourceChunkId ?? null,
+              documentId: t.documentId ?? documentId,
             }
           );
         }
@@ -149,12 +153,24 @@ class Neo4jGraphStore extends GraphStore {
    * Query multiple entities in parallel and merge results.
    * @param {string[]} entityNames - Array of entity names to query
    * @param {number} depth - Passed through to queryByEntity
+   * @param {number} [maxConcurrent=5] - Max concurrent Neo4j queries to avoid flooding
    * @returns {Promise<Array>} Deduplicated, confidence-sorted triples
    * @note Deduplication uses a Map keyed on `subject|predicate|object` (lowercased).
    */
-  async queryByEntities(entityNames, depth = 1) {
+  async queryByEntities(entityNames, depth = 1, maxConcurrent = 5) {
     if (!entityNames || entityNames.length === 0) return [];
-    const sets = await Promise.all(entityNames.map(e => this.queryByEntity(e, depth)));
+    
+    const batches = [];
+    for (let i = 0; i < entityNames.length; i += maxConcurrent) {
+      batches.push(entityNames.slice(i, i + maxConcurrent));
+    }
+    
+    const sets = [];
+    for (const batch of batches) {
+      const batchResults = await Promise.all(batch.map(e => this.queryByEntity(e, depth)));
+      sets.push(...batchResults);
+    }
+    
     const seen = new Map();
     for (const batch of sets) {
       for (const t of batch) {
@@ -163,6 +179,101 @@ class Neo4jGraphStore extends GraphStore {
       }
     }
     return [...seen.values()].sort((a, b) => b.confidence - a.confidence);
+  }
+
+  /**
+   * Delete all relations matching a document ID prefix.
+   * Uses STARTS WITH on the chunk ID pattern to avoid prefix collisions
+   * (e.g. "doc.md_chunk_0" won't match "doc.md_backup_chunk_0").
+   * Also removes orphaned entities left with no relationships.
+   *
+   * @param {string} docId - Document ID (e.g. "doc1.md")
+   * @returns {Promise<{ deletedCount: number }>}
+   */
+  async deleteByDocId(docId) {
+    const session = this._driver.session();
+    try {
+      const chunkPrefix = `${docId}_chunk_`;
+      const result = await session.run(
+        `MATCH ()-[r:RELATION]->()
+         WHERE r.sourceChunkId STARTS WITH $chunkPrefix
+         DELETE r
+         RETURN count(r) AS deletedCount`,
+        { chunkPrefix }
+      );
+
+      const deletedCount = Number(result.records[0]?.get('deletedCount') ?? 0);
+
+      await session.run(
+        `MATCH (e:Entity)
+         WHERE NOT (e)-[:RELATION]-()
+         DELETE e`
+      );
+
+      return { deletedCount };
+    } finally {
+      await session.close();
+    }
+  }
+
+  /**
+   * Internal helpers for atomic document updates.
+   * These accept an open transaction/session so delete+insert can be atomic.
+   */
+
+  async _deleteByDocIdInSession(session, docId) {
+    const chunkPrefix = `${docId}_chunk_`;
+    await session.run(
+      `MATCH ()-[r:RELATION]->()
+       WHERE r.sourceChunkId STARTS WITH $chunkPrefix
+       DELETE r`,
+      { chunkPrefix }
+    );
+  }
+
+  async _storeTriplesInSession(session, triples) {
+    for (const t of triples) {
+      await session.run(
+        `MERGE (s:Entity {name: $subject})
+         MERGE (o:Entity {name: $object})
+         CREATE (s)-[:RELATION {predicate: $predicate, confidence: $confidence, sourceChunkId: $sourceChunkId, documentId: $documentId}]->(o)`,
+        {
+          subject: t.subject.toLowerCase(),
+          object: t.object.toLowerCase(),
+          predicate: t.predicate,
+          confidence: t.confidence ?? 1.0,
+          sourceChunkId: t.sourceChunkId ?? null,
+          documentId: t.documentId ?? null,
+        }
+      );
+    }
+  }
+
+  /**
+   * Atomically replace all triples for a document:
+   * delete old + insert new in a single transaction.
+   *
+   * @param {string} docId
+   * @param {Array} triples - New triples to insert
+   * @returns {Promise<{ deletedCount: number, insertedCount: number }>}
+   */
+  async replaceTriplesForDoc(docId, triples = []) {
+    const session = this._driver.session();
+    try {
+      const tx = await session.beginTransaction();
+      try {
+        await this._deleteByDocIdInSession(tx, docId);
+        const inserted = triples.length;
+        await this._storeTriplesInSession(tx, triples.map(t => ({ ...t, documentId: docId })));
+        await tx.commit();
+        return { deletedCount: null, insertedCount: inserted };
+      } catch (err) {
+        await tx.rollback();
+        throw err;
+      }
+    } finally {
+      await session.close();
+    }
   }
 
   /**

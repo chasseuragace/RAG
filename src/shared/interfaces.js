@@ -70,9 +70,11 @@ class ProvenanceAnnotator {
  */
 class GraphStore {
   async storeTriple(triple) { throw new Error('not implemented'); }
+  async storeTriples(triples) { throw new Error('not implemented'); }
   async queryByEntity(entityName, depth) { throw new Error('not implemented'); }
-  async queryByEntities(entityNames, depth) { throw new Error('not implemented'); }
+  async queryByEntities(entityNames, depth, maxConcurrent = 5) { throw new Error('not implemented'); }
   async clear() { throw new Error('not implemented'); }
+  async deleteByDocId(docId) { throw new Error('not implemented'); }
   async getStats() { throw new Error('not implemented'); }
 }
 

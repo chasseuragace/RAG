@@ -2,11 +2,12 @@ const { serverEvents } = require('../shared/events');
 const { HeuristicQueryRewriter, LLMQueryRewriter } = require('./query-rewriter');
 
 class RetrievalExecutor {
-  constructor(embedder, hybridStore, reranker, queryRewriter) {
+  constructor(embedder, hybridStore, reranker, queryRewriter, unifiedPipeline = null) {
     this.embedder = embedder;
     this.hybridStore = hybridStore;
     this.reranker = reranker;
     this.queryRewriter = queryRewriter || new HeuristicQueryRewriter();
+    this.unifiedPipeline = unifiedPipeline;
   }
 
   async execute(action, observation) {
@@ -42,13 +43,22 @@ class RetrievalExecutor {
   async _search(observation, topK, actionType, queryOverride = null) {
     const query = queryOverride || observation.query;
     const start = Date.now();
-    const qEmb = await this.embedder.embed(query);
-    const candidates = await this.hybridStore.search(qEmb, query, topK);
-    const reranked = await this.reranker.rerank(query, candidates);
-    const duration = Date.now() - start;
-    serverEvents.logEvent('agentic:search', { query, topK, resultCount: reranked.length, duration, actionType });
+    let reranked;
+    if (this.unifiedPipeline) {
+      const fused = await this.unifiedPipeline.retrieve(query, { topK: topK * 4 });
+      const pool = fused.candidates || [];
+      reranked = this.reranker && pool.length > 0
+        ? await this.reranker.rerank(query, pool)
+        : pool;
+      serverEvents.logEvent('agentic:search', { query, topK, resultCount: reranked.length, duration: Date.now() - start, actionType, mode: 'unified' });
+    } else {
+      const qEmb = await this.embedder.embed(query);
+      const candidates = await this.hybridStore.search(qEmb, query, topK);
+      reranked = this.reranker ? await this.reranker.rerank(query, candidates) : candidates;
+      serverEvents.logEvent('agentic:search', { query, topK, resultCount: reranked.length, duration: Date.now() - start, actionType });
+    }
     const newObs = observation.withResults(reranked);
-    return newObs.withAction({ type: actionType, query, resultCount: reranked.length, duration });
+    return newObs.withAction({ type: actionType, query, resultCount: reranked.length, duration: Date.now() - start });
   }
 }
 

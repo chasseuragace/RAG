@@ -40,6 +40,7 @@ const { MockContextFuser } = require('../retrieval/graph/mock-fuser');
 const { MockProvenanceAnnotator } = require('../ingestion/authority/mock-annotator');
 const { StaticDictionaryScorer } = require('../retrieval/authority/mock-scorer');
 const { AuthorityAwareReranker } = require('../retrieval/rerankers/authority-aware');
+const { UnifiedRetrievalPipeline } = require('../retrieval/unified-pipeline');
 
 // public/ lives at the project root, one level above src/
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
@@ -69,6 +70,7 @@ class RAGServer {
     this.bm25Store  = null;
     this.reranker   = null;
     this.graphStore = null;
+    this.unifiedPipeline = null;
     this.registry   = null;
     this.server     = null;
     this.wsServer   = null;
@@ -112,10 +114,23 @@ class RAGServer {
       );
 
       // Agentic loop (multi-iteration quality control)
+      this.unifiedPipeline = new UnifiedRetrievalPipeline({
+        embedder,
+        hybridStore: hybrid,
+        graphStore,
+        contextFuser: fuser,
+        ner,
+        glossary,
+        filter,
+        minGraphConfidence: 0.6,
+        graphDepth: 2,
+        candidateK: 20,
+      });
       this.agenticPipeline = new AgenticRetrievalPipeline(
         embedder, hybrid, reranker,
         { objective: RetrievalObjectives.BALANCED, latencyBudget: 5000, maxIterations: 2, minimumQuality: 0.5 },
-        null, judge, queryRewriter
+        null, judge, queryRewriter,
+        this.unifiedPipeline
       );
 
       // Graph-RAG: dual-path parallel retrieval + context fusion + authority-aware rerank
@@ -152,9 +167,23 @@ class RAGServer {
       );
 
       // Agentic loop
+      this.unifiedPipeline = new UnifiedRetrievalPipeline({
+        embedder,
+        hybridStore: hybrid,
+        graphStore,
+        contextFuser: fuser,
+        ner,
+        glossary,
+        filter,
+        minGraphConfidence: 0.6,
+        graphDepth: 2,
+        candidateK: 20,
+      });
       this.agenticPipeline = new AgenticRetrievalPipeline(
         embedder, hybrid, reranker,
-        { objective: RetrievalObjectives.BALANCED, latencyBudget: 5000, maxIterations: 2, minimumQuality: 0.5 }
+        { objective: RetrievalObjectives.BALANCED, latencyBudget: 5000, maxIterations: 2, minimumQuality: 0.5 },
+        null, null, null,
+        this.unifiedPipeline
       );
 
       // Graph-RAG: dual-path parallel retrieval + context fusion + authority-aware rerank

@@ -24,7 +24,8 @@ const { runDeltaTests } = require('./tests/delta.test');
 const { runChromaTests } = require('./tests/chroma.test');
 const { setupTests: setupAdvancedTests } = require('./tests/advanced.test');
 const { setupTests: setupPhase23Tests } = require('./tests/phase2-3.test');
-const { setupTests: setupPhase5Tests } = require('./tests/phase5.test');
+  const { setupTests: setupPhase5Tests } = require('./tests/phase5.test');
+  const { setupMockTests: setupUnifiedMockTests, setupRealTests: setupUnifiedRealTests } = require('./tests/unified.test');
 
 async function main() {
   const args = process.argv.slice(2);
@@ -46,6 +47,23 @@ async function main() {
       const ok = await runner.run();
       process.exit(ok ? 0 : 1);
     } catch(e) { console.error('\n❌ Phase 2/3 tests failed:', e.message); process.exit(1); }
+  } else if (args.includes('--unified-test')) {
+    try {
+      const mockOnly = args.includes('--mock-only');
+      let ok = true;
+      if (mockOnly) {
+        const runner = await setupUnifiedMockTests();
+        ok = await runner.run();
+      } else {
+        console.log('\n── Mock unified tests ──');
+        const mockRunner = await setupUnifiedMockTests();
+        ok = ok && await mockRunner.run();
+        console.log('\n── Real unified tests ──');
+        const realRunner = await setupUnifiedRealTests();
+        ok = ok && await realRunner.run();
+      }
+      process.exit(ok ? 0 : 1);
+    } catch(e) { console.error('\n❌ Unified tests failed:', e.message); process.exit(1); }
   } else if (args.includes('--advanced-test')) {
     try {
       const runner = await setupAdvancedTests();
@@ -79,6 +97,8 @@ Usage:
   node rag-server.js --advanced-test      Run reranking / agentic / hybrid tests
   node rag-server.js --phase5-test        Run Phase 5 tests (LLMPolicy, GoldenDataset, ReplayHarness)
   node rag-server.js --phase23-test       Run Phase 2 & 3 tests (rationale, evidence, policies)
+  node rag-server.js --unified-test       Run unified architecture validation tests
+  node rag-server.js --unified-test --mock-only  Run mock-only unified tests (no external services)
   node rag-server.js --delta-test         Run incremental-sync (delta) tests
   node rag-server.js --real-test          Run real integration tests
   node rag-server.js --server             Start mock server (port 3000)

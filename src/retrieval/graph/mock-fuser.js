@@ -32,6 +32,7 @@ const { ContextFuser } = require('../../shared/interfaces');
 const DEFAULT_OPTIONS = {
   maxGraphFacts:  20,    // hard cap on injected triples
   maxTextChunks:  10,    // hard cap on text passages
+  minGraphConfidence: 0.6,
   factSeparator:  '\n',
   chunkSeparator: '\n\n---\n\n',
 };
@@ -41,6 +42,7 @@ class MockContextFuser extends ContextFuser {
    * @param {object} [opts]
    * @param {number} [opts.maxGraphFacts=20]
    * @param {number} [opts.maxTextChunks=10]
+   * @param {number} [opts.minGraphConfidence=0.6]
    * @param {string} [opts.factSeparator]
    * @param {string} [opts.chunkSeparator]
    */
@@ -59,20 +61,35 @@ class MockContextFuser extends ContextFuser {
     // ── 1. Graph facts ───────────────────────────────────────────────────────
     const seen  = new Set();
     const facts = [];
+    const dropped = [];
     for (const t of (graphPaths || [])) {
       const key = `${(t.subject||'').toLowerCase()}|${t.predicate}|${(t.object||'').toLowerCase()}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      facts.push(t);
+      const confidence = t.confidence ?? 1.0;
+      if (confidence >= this.opts.minGraphConfidence) {
+        facts.push(t);
+      } else {
+        dropped.push(t);
+      }
       if (facts.length >= this.opts.maxGraphFacts) break;
     }
 
-    // Render as human-readable lines
+    const renderConfidence = (c) => c < 1.0 ? ` [confidence: ${(c * 100).toFixed(0)}%]` : '';
+
     const graphFacts = facts.map(t =>
       `${t.subject.toUpperCase()} ${t.predicate} ${t.object.toUpperCase()}` +
-      (t.confidence < 1.0 ? ` [confidence: ${(t.confidence * 100).toFixed(0)}%]` : '') +
-      (t.sourceChunkId    ? ` (source: ${t.sourceChunkId})` : '')
+      renderConfidence(t.confidence ?? 1.0) +
+      (t.sourceChunkId ? ` (source: ${t.sourceChunkId})` : '')
     );
+
+    const droppedGraphFacts = dropped.map(t => ({
+      subject: t.subject,
+      predicate: t.predicate,
+      object: t.object,
+      confidence: t.confidence,
+      sourceChunkId: t.sourceChunkId,
+    }));
 
     // ── 2. Text chunks ───────────────────────────────────────────────────────
     const textChunks = (vectorChunks || []).slice(0, this.opts.maxTextChunks);
@@ -105,12 +122,14 @@ class MockContextFuser extends ContextFuser {
 
     return {
       graphFacts,
+      droppedGraphFacts,
       textChunks,
       combined,
       meta: {
         graphFactCount:  graphFacts.length,
+        droppedGraphFactCount: droppedGraphFacts.length,
         textChunkCount:  textChunks.length,
-        fusionStrategy: 'mock-sequential',
+        fusionStrategy:  'mock-sequential',
         query,
       },
     };

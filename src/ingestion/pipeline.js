@@ -38,6 +38,12 @@ class ConcreteInjectionPipeline extends InjectionPipeline {
       await this.store.clear();
       serverEvents.logEvent('injection:cleared', {});
 
+      // 1b. Clear existing graph triples on full rebuild
+      if (this.graphStore) {
+        await this.graphStore.clear();
+        serverEvents.logEvent('injection:graph-cleared', {});
+      }
+
       // 2. Load raw documents (whole files)
       const docs = await this.loader.loadDocuments(folderPath);
       if (!docs.length) throw new Error('No documents found');
@@ -124,8 +130,26 @@ class ConcreteInjectionPipeline extends InjectionPipeline {
     }
 
     // Relationship extraction → graph store (opt-in)
+    // Uses atomic replaceTriplesForDoc so old triples are deleted and new ones
+    // inserted in a single Neo4j transaction. If anything fails, the graph is
+    // left unchanged (no orphaned partial state).
     if (this.relExtractor && this.graphStore) {
-      await this._extractAndStoreTriples(chunks);
+      const triples = [];
+      for (const chunk of chunks) {
+        try {
+          const extracted = await this.relExtractor.extract(chunk.content, chunk.id);
+          for (const t of extracted) {
+            t.documentId = doc.id;
+            triples.push(t);
+          }
+        } catch (err) {
+          serverEvents.logEvent('injection:graph-error', { chunkId: chunk.id, error: err.message });
+        }
+      }
+      if (triples.length > 0) {
+        await this.graphStore.replaceTriplesForDoc(doc.id, triples);
+        serverEvents.logEvent('injection:graph-triples', { tripleCount: triples.length, docId: doc.id });
+      }
     }
 
     const embeddings = await this.embedder.embedBatch(chunks.map(c => c.content));
@@ -164,6 +188,7 @@ class ConcreteInjectionPipeline extends InjectionPipeline {
    *
    * @param {{ id: string, content: string, metadata: object }[]} chunks
    * @returns {Promise<number>}
+   * @deprecated Replaced by inline atomic graph logic in _indexDoc.
    */
   async _extractAndStoreTriples(chunks) {
     let total = 0;
@@ -196,6 +221,9 @@ class ConcreteInjectionPipeline extends InjectionPipeline {
       // 1. Deletions: drop chunks for files no longer present.
       for (const docId of removed) {
         await this.store.deleteByDocId(docId);
+        if (this.graphStore) {
+          await this.graphStore.deleteByDocId(docId);
+        }
         registry.remove(docId);
       }
 
@@ -205,7 +233,12 @@ class ConcreteInjectionPipeline extends InjectionPipeline {
       const changedIds = new Set(changed.map(d => d.id));
       let chunksStored = 0;
       for (const doc of [...added, ...changed]) {
-        if (changedIds.has(doc.id)) await this.store.deleteByDocId(doc.id);
+        if (changedIds.has(doc.id)) {
+          await this.store.deleteByDocId(doc.id);
+          if (this.graphStore) {
+            await this.graphStore.deleteByDocId(doc.id);
+          }
+        }
         const n = await this._indexDoc(doc);
         registry.set(doc.id, {
           hash: doc._hash,

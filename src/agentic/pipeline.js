@@ -8,7 +8,7 @@ const { RetrievalExecutor } = require('./executor');
 const { serverEvents } = require('../shared/events');
 
 class AgenticRetrievalPipeline extends RetrievalPipeline {
-  constructor(embedder, hybridStore, reranker, goal, policy, judge, queryRewriter) {
+  constructor(embedder, hybridStore, reranker, goal, policy, judge, queryRewriter, unifiedPipeline = null) {
     super(embedder, hybridStore);
     this.embedder = embedder;
     this.hybridStore = hybridStore;
@@ -19,13 +19,13 @@ class AgenticRetrievalPipeline extends RetrievalPipeline {
       maxIterations: 2,
       minimumQuality: 0.5
     };
-    this.strategy = { run: this._createStrategy(embedder, hybridStore, reranker, policy, judge, queryRewriter) };
+    this.strategy = { run: this._createStrategy(embedder, hybridStore, reranker, policy, judge, queryRewriter, unifiedPipeline) };
   }
 
-  _createStrategy(embedder, hybridStore, reranker, policy, judge, queryRewriter) {
+  _createStrategy(embedder, hybridStore, reranker, policy, judge, queryRewriter, unifiedPipeline) {
     const judgeInstance = judge || new RetrievalJudge();
     const policyInstance = policy || new HeuristicRetrievalPolicy();
-    const executor = new RetrievalExecutor(embedder, hybridStore, reranker, queryRewriter);
+    const executor = new RetrievalExecutor(embedder, hybridStore, reranker, queryRewriter, unifiedPipeline);
     const coordinator = new Coordinator(judgeInstance, policyInstance, executor);
     return async (observation, maxIterations) => coordinator.run(observation, { ...this.goal, maxIterations });
   }
