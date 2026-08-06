@@ -42,7 +42,7 @@ flowchart TB
 
     subgraph AgenticLoop["🧠 AgenticRetrievalPipeline — primary /ask pipeline\n(Coordinator loop, bounded by maxIterations + latencyBudget)"]
         direction TB
-        ColdStart["Cold-start guard\nif results=[] → call ExecN for initial search\nbefore entering the judge/policy loop\n(avoids wasting a judge call on empty context)"]
+        ColdStart["Cold-start guard\nif results=[] AND rerankedResults=[]\n  → call ExecN for initial search before judge/policy loop\nelse → proceed directly to BuildCtx\n(idempotent: if results already present, ExecN skips to BuildCtx instantly)"]
         BuildCtx["Coordinator._buildContext()\n• add user message to thread (deduped by sessionId+query key)\n• ContextWindowManager.buildContext() over thread history\n  + reranked results + graphFacts → contextPayload\n• summarisation fires here when token budget exceeded"]
         JudgeN["Judge.evaluate(observation) → RetrievalAssessment\n• runs AFTER BuildCtx so it always sees windowed context\n• RetrievalJudge: heuristic (always fast)\n• LLMJudge: wraps heuristic, escalates to LLM only in gray zone 0.4–0.7"]
         PolicyN["Policy.resolve() → Decision  (action + rationale + evidence)\n• HeuristicRetrievalPolicy (mock) / LLMPolicy (real)\n• LLMPolicy falls back to heuristic on inference failure"]
@@ -116,7 +116,8 @@ flowchart TB
 
     %% ── /ask — unified agentic pipeline ──────────────────────────────
     Server -->|"/ask  sessionId  topK"| ColdStart
-    ColdStart -->|"if results=[]: force initial ExecN search first"| ExecN
+    ColdStart -->|"results=[] → force initial search"| ExecN
+    ColdStart -->|"results already present → skip search"| BuildCtx
     ExecN -->|"Observation with results → enter loop"| BuildCtx
     BuildCtx --> JudgeN --> PolicyN
     PolicyN --> TimeoutGuard
