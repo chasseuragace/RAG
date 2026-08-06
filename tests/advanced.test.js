@@ -1,10 +1,10 @@
 const { TestRunner } = require('./runner');
-const { MockEmbedder } = require('../src/embedders/mock');
-const { MockVectorStore } = require('../src/stores/mock');
-const { BM25Store } = require('../src/stores/bm25');
-const { HybridStore } = require('../src/stores/hybrid');
-const { MockReranker } = require('../src/rerankers/mock');
-const { AgenticRetrievalPipeline } = require('../src/pipelines/agentic-retrieval');
+const { MockEmbedder } = require('../src/retrieval/embedders/mock');
+const { MockVectorStore } = require('../src/retrieval/stores/mock');
+const { BM25Store } = require('../src/retrieval/stores/bm25');
+const { HybridStore } = require('../src/retrieval/stores/hybrid');
+const { MockReranker } = require('../src/retrieval/rerankers/mock');
+const { AgenticRetrievalPipeline } = require('../src/agentic/pipeline');
 const { HeuristicRetrievalStrategy } = require('../src/agentic/strategies/heuristic');
 const { RetrievalAssessment } = require('../src/agentic/assessment');
 const { Trace, TraceEvent } = require('../src/agentic/trace');
@@ -15,7 +15,7 @@ const { HeuristicRetrievalPolicy } = require('../src/agentic/policies/heuristic'
 const { RetrievalJudge } = require('../src/agentic/judge');
 const { Observation } = require('../src/agentic/observation');
 const { RetrievalExecutor } = require('../src/agentic/executor');
-const { RetrievalObjectives } = require('../src/core/interfaces');
+const { RetrievalObjectives } = require('../src/shared/interfaces');
 
 function cosine(a, b) {
   let dot = 0, na = 0, nb = 0;

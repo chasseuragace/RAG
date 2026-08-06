@@ -14,18 +14,18 @@ const { TestRunner } = require('./runner');
 const { LLMPolicy, VALID_ACTIONS } = require('../src/agentic/policies/llm');
 const { HeuristicRetrievalPolicy } = require('../src/agentic/policies/heuristic');
 const { BalancedPolicy } = require('../src/agentic/policies/balanced');
-const { GoldenDataset } = require('../src/core/golden-dataset');
-const { ReplayHarness } = require('../src/agentic/replay');
+const { GoldenDataset } = require('../src/evaluation/golden-dataset');
+const { ReplayHarness } = require('../src/evaluation/replay');
 const { RetrievalAssessment } = require('../src/agentic/assessment');
 const { Decision } = require('../src/agentic/decision');
 const { Trace, TraceEvent } = require('../src/agentic/trace');
-const { RetrievalObjectives } = require('../src/core/interfaces');
-const { MockEmbedder } = require('../src/embedders/mock');
-const { MockVectorStore } = require('../src/stores/mock');
-const { BM25Store } = require('../src/stores/bm25');
-const { HybridStore } = require('../src/stores/hybrid');
-const { MockReranker } = require('../src/rerankers/mock');
-const { AgenticRetrievalPipeline } = require('../src/pipelines/agentic-retrieval');
+const { RetrievalObjectives } = require('../src/shared/interfaces');
+const { MockEmbedder } = require('../src/retrieval/embedders/mock');
+const { MockVectorStore } = require('../src/retrieval/stores/mock');
+const { BM25Store } = require('../src/retrieval/stores/bm25');
+const { HybridStore } = require('../src/retrieval/stores/hybrid');
+const { MockReranker } = require('../src/retrieval/rerankers/mock');
+const { AgenticRetrievalPipeline } = require('../src/agentic/pipeline');
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 

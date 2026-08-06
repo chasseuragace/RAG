@@ -7,10 +7,10 @@ const path = require('path');
 const fs = require('fs');
 
 const { TestRunner } = require('./runner');
-const { chunkText } = require('../src/core/chunker');
-const { DocRegistry, hashContent } = require('../src/core/registry');
-const { MockEmbedder } = require('../src/embedders/mock');
-const { MockVectorStore } = require('../src/stores/mock');
+const { chunkText } = require('../src/shared/chunker');
+const { DocRegistry, hashContent } = require('../src/ingestion/registry');
+const { MockEmbedder } = require('../src/retrieval/embedders/mock');
+const { MockVectorStore } = require('../src/retrieval/stores/mock');
 
 async function setupTests() {
   const runner = new TestRunner();

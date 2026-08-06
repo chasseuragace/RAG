@@ -21,7 +21,7 @@
 const { RetrievalPolicy } = require('../policy');
 const { Decision } = require('../decision');
 const { HeuristicRetrievalPolicy } = require('./heuristic');
-const { serverEvents } = require('../../events');
+const { serverEvents } = require('../../shared/events');
 const { extractJson } = require('../lib/llm-json');
 
 const VALID_ACTIONS = ['answer', 'increase_topk', 'rewrite_query', 'stop'];

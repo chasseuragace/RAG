@@ -1,4 +1,4 @@
-const { serverEvents } = require('../events');
+const { serverEvents } = require('../shared/events');
 const { RetrievalAssessment } = require('./assessment');
 const { extractJson } = require('./lib/llm-json');
 

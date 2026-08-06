@@ -1,4 +1,4 @@
-const { serverEvents } = require('../events');
+const { serverEvents } = require('../shared/events');
 
 class TraceEvent {
   constructor({ timestamp, iteration, phase, action = null, assessment = null, decision = null, timing = null }) {

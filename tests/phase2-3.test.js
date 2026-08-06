@@ -18,13 +18,13 @@ const { HeuristicRetrievalPolicy } = require('../src/agentic/policies/heuristic'
 const { AggressiveRetrievalPolicy } = require('../src/agentic/policies/aggressive');
 const { LowLatencyPolicy } = require('../src/agentic/policies/lowlatency');
 const { BalancedPolicy } = require('../src/agentic/policies/balanced');
-const { RetrievalObjectives } = require('../src/core/interfaces');
-const { MockEmbedder } = require('../src/embedders/mock');
-const { MockVectorStore } = require('../src/stores/mock');
-const { BM25Store } = require('../src/stores/bm25');
-const { HybridStore } = require('../src/stores/hybrid');
-const { MockReranker } = require('../src/rerankers/mock');
-const { AgenticRetrievalPipeline } = require('../src/pipelines/agentic-retrieval');
+const { RetrievalObjectives } = require('../src/shared/interfaces');
+const { MockEmbedder } = require('../src/retrieval/embedders/mock');
+const { MockVectorStore } = require('../src/retrieval/stores/mock');
+const { BM25Store } = require('../src/retrieval/stores/bm25');
+const { HybridStore } = require('../src/retrieval/stores/hybrid');
+const { MockReranker } = require('../src/retrieval/rerankers/mock');
+const { AgenticRetrievalPipeline } = require('../src/agentic/pipeline');
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 

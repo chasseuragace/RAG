@@ -1,4 +1,4 @@
-const { serverEvents } = require('../events');
+const { serverEvents } = require('../shared/events');
 const { Decision } = require('./decision');
 const { Trace, TraceEvent } = require('./trace');
 

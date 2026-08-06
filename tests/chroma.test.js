@@ -5,7 +5,7 @@
  *
  * Run: node rag-server.js --chroma-test
  */
-const { ChromaVectorStore } = require('../src/stores/chroma');
+const { ChromaVectorStore } = require('../src/retrieval/stores/chroma');
 
 // Tiny deterministic embedding so we don't need a real embedder.
 function vec(seed, dim = 8) {

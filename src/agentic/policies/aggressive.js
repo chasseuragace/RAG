@@ -1,6 +1,6 @@
 const { RetrievalPolicy } = require('../policy');
 const { Decision } = require('../decision');
-const { serverEvents } = require('../../events');
+const { serverEvents } = require('../../shared/events');
 
 /**
  * AggressiveRetrievalPolicy — maximises recall.

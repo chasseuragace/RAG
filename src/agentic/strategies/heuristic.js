@@ -2,7 +2,7 @@ const { Coordinator } = require('../coordinator');
 const { RetrievalJudge } = require('../judge');
 const { HeuristicRetrievalPolicy } = require('../policies/heuristic');
 const { RetrievalExecutor } = require('../executor');
-const { serverEvents } = require('../../events');
+const { serverEvents } = require('../../shared/events');
 
 class HeuristicRetrievalStrategy {
   constructor(embedder, hybridStore, reranker, config = {}) {

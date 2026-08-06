@@ -7,11 +7,11 @@ const os = require('os');
 const path = require('path');
 const fs = require('fs');
 
-const { DocumentLoader } = require('../src/core/interfaces');
-const { DocRegistry } = require('../src/core/registry');
-const { MockEmbedder } = require('../src/embedders/mock');
-const { MockVectorStore } = require('../src/stores/mock');
-const { ConcreteInjectionPipeline } = require('../src/pipelines/injection');
+const { DocumentLoader } = require('../src/shared/interfaces');
+const { DocRegistry } = require('../src/ingestion/registry');
+const { MockEmbedder } = require('../src/retrieval/embedders/mock');
+const { MockVectorStore } = require('../src/retrieval/stores/mock');
+const { ConcreteInjectionPipeline } = require('../src/ingestion/pipeline');
 
 async function runDeltaTests() {
   const assert = (cond, msg) => {

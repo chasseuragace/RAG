@@ -13,11 +13,11 @@
  * - Hardcoded input directory: ./input (override via RAG_INPUT_DIR env)
  */
 
-const { RAGServer } = require('./src/server');
-const { serverEvents } = require('./src/events');
-const { ConversationStore } = require('./src/core/conversation');
-const { DocRegistry } = require('./src/core/registry');
-const { chunkText } = require('./src/core/chunker');
+const { RAGServer } = require('./src/api/server');
+const { serverEvents } = require('./src/shared/events');
+const { ConversationStore } = require('./src/session/conversation');
+const { DocRegistry } = require('./src/ingestion/registry');
+const { chunkText } = require('./src/shared/chunker');
 const { setupTests: setupMockTests } = require('./tests/mock.test');
 const { setupRealTests } = require('./tests/real.test');
 const { runDeltaTests } = require('./tests/delta.test');

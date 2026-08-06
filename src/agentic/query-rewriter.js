@@ -9,7 +9,7 @@
  * Both conform to the same interface: rewrite(query, observation, rationale, evidence) → string.
  */
 
-const { serverEvents } = require('../events');
+const { serverEvents } = require('../shared/events');
 
 class QueryRewriter {
   rewrite(query, observation, rationale, evidence) {

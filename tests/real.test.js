@@ -3,9 +3,9 @@
  * Run with `node rag-server.js --real-test` and the relevant API keys set.
  */
 const { TestRunner } = require('./runner');
-const { RealDocumentLoader } = require('../src/loaders/real');
-const { GeminiEmbedder } = require('../src/embedders/gemini');
-const { ChromaVectorStore } = require('../src/stores/chroma');
+const { RealDocumentLoader } = require('../src/ingestion/loaders/real');
+const { GeminiEmbedder } = require('../src/retrieval/embedders/gemini');
+const { ChromaVectorStore } = require('../src/retrieval/stores/chroma');
 const { NovitaInference } = require('../src/inference/novita');
 
 async function setupRealTests() {

@@ -1,4 +1,4 @@
-const { serverEvents } = require('../events');
+const { serverEvents } = require('../shared/events');
 const { HeuristicQueryRewriter, LLMQueryRewriter } = require('./query-rewriter');
 
 class RetrievalExecutor {

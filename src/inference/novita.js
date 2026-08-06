@@ -1,4 +1,4 @@
-const { serverEvents } = require('../events');
+const { serverEvents } = require('../shared/events');
 
 class NovitaInference {
   constructor(apiKey = null, model = 'deepseek/deepseek-v4-pro') {

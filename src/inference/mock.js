@@ -1,4 +1,4 @@
-const { serverEvents } = require('../events');
+const { serverEvents } = require('../shared/events');
 
 class MockInference {
   constructor(model = 'mock/deepseek-v4-mock') {
