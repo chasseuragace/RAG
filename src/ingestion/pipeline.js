@@ -103,7 +103,7 @@ class ConcreteInjectionPipeline extends InjectionPipeline {
       }
 
       // 6. Rebuild the registry to match the freshly-embedded corpus.
-      if (registry) registry.replaceAll(registryRecords);
+      if (registry) await registry.replaceAll(registryRecords);
 
       const duration = Date.now() - start;
       serverEvents.logEvent('injection:complete', { documentsProcessed: docs.length, chunksStored: chunks.length, duration });
@@ -225,7 +225,7 @@ class ConcreteInjectionPipeline extends InjectionPipeline {
         if (this.graphStore) {
           await this.graphStore.deleteByDocId(docId);
         }
-        registry.remove(docId);
+        await registry.remove(docId);
       }
 
       // 2. Additions + changes: re-index only the delta.
@@ -241,7 +241,7 @@ class ConcreteInjectionPipeline extends InjectionPipeline {
           }
         }
         const n = await this._indexDoc(doc);
-        registry.set(doc.id, {
+        await registry.set(doc.id, {
           hash: doc._hash,
           size: doc.metadata.size,
           mtime: doc.metadata.mtime,

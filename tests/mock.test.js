@@ -57,12 +57,15 @@ async function setupTests() {
   runner.test('DocRegistry.diff classifies added/unchanged/changed/removed', async (a) => {
     const tmp = path.join(os.tmpdir(), `reg-mock-${process.pid}.json`);
     if (fs.existsSync(tmp)) fs.unlinkSync(tmp);
-    const reg = new DocRegistry(tmp);
+    const reg = new DocRegistry({ filePath: tmp });
+    await reg.init();
+    // Clear any state left by a previous run (PG-backed or JSON).
+    await reg.replaceAll({});
 
     let d = reg.diff([{ id: 'f', content: 'v1' }]);
     await a.assertEqual(d.added.length, 1, 'unseen file => added');
 
-    reg.set('f', { hash: hashContent('v1') });
+    await reg.set('f', { hash: hashContent('v1') });
     d = reg.diff([{ id: 'f', content: 'v1' }]);
     await a.assertEqual(d.unchanged.length, 1, 'same content => unchanged');
 
@@ -72,7 +75,8 @@ async function setupTests() {
     d = reg.diff([]);
     await a.assertEqual(d.removed.length, 1, 'missing file => removed');
 
-    fs.unlinkSync(tmp);
+    await reg.close();
+    if (fs.existsSync(tmp)) fs.unlinkSync(tmp);
   });
 
   return runner;

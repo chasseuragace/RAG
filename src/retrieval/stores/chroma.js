@@ -27,6 +27,13 @@ class ChromaVectorStore extends VectorStore {
     const content = metadata.content || '';
     const chromaMeta = { ...metadata };
     delete chromaMeta.content;
+    // Chroma metadata values must be scalars (string | number | boolean).
+    // Flatten any nested objects to JSON strings so ingestion never 422s.
+    for (const [k, v] of Object.entries(chromaMeta)) {
+      if (v !== null && typeof v === 'object') {
+        chromaMeta[k] = JSON.stringify(v);
+      }
+    }
     const res = await fetch(`${this.baseUrl}/api/v2/tenants/${this.tenant}/databases/${this.database}/collections/${colId}/add`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ids: [id], embeddings: [embedding], metadatas: [chromaMeta], documents: [content] })

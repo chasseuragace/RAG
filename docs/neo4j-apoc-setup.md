@@ -42,16 +42,18 @@ docker exec neo4j-db ls -la /var/lib/neo4j/plugins/
 
 ### Step 4: Enable APOC in Neo4j config
 
-APOC procedures are restricted by default. You need to add them to the allowlist:
+**As of the current docker-compose.yml, this step is handled automatically** via the environment variables:
+
+```yaml
+- NEO4J_dbms_security_procedures_allowlist=apoc.*
+- NEO4J_dbms_security_procedures_unrestricted=apoc.*
+```
+
+No manual `docker exec` needed. If you are on an older compose setup without those vars, the manual fallback is:
 
 ```bash
 docker exec neo4j-db bash -c "echo 'dbms.security.procedures.allowlist=apoc.*' >> /var/lib/neo4j/conf/neo4j.conf"
-```
-
-Then restart Neo4j:
-
-```bash
-docker-compose restart neo4j
+docker compose restart neo4j
 ```
 
 ### Step 5: Verify APOC procedures are callable
@@ -90,7 +92,12 @@ docker exec neo4j-db cypher-shell -u neo4j -p neo4j_password "SHOW PROCEDURES YI
 
 **Root cause:** Neo4j 5.x restricts which procedures can be called via `dbms.security.procedures.allowlist`. The default allowlist only includes `apoc.coll.*`, `apoc.load.*`, and `gds.*`. APOC path procedures (`apoc.path.*`) are not in the default allowlist.
 
-**Fix:** Add `dbms.security.procedures.allowlist=apoc.*` to `/var/lib/neo4j/conf/neo4j.conf`
+**Fix (current docker-compose.yml):** The allowlist is now set automatically via environment variables:
+```yaml
+- NEO4J_dbms_security_procedures_allowlist=apoc.*
+- NEO4J_dbms_security_procedures_unrestricted=apoc.*
+```
+Recreate the container (`docker compose down neo4j && docker compose up -d neo4j`) and it applies on first boot. No `docker exec` required.
 
 ### Failure 4: Using parameters in Cypher path-length patterns
 

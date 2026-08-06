@@ -61,7 +61,8 @@ class HybridStore extends VectorStore {
 
   async getStats() {
     const vs = await this.vectorStore.getStats();
-    return { ...vs, bm25Documents: this.bm25Store.totalDocs };
+    const bm25Stats = await this.bm25Store.getStats();
+    return { ...vs, bm25Documents: bm25Stats.totalDocuments };
   }
 }
 

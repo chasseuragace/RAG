@@ -46,7 +46,10 @@ const { RetrievalObjectives } = require('../src/shared/interfaces');
 function tempRegistry() {
   const tmp = path.join(os.tmpdir(), `rag-unified-${process.pid}.json`);
   if (fs.existsSync(tmp)) fs.unlinkSync(tmp);
-  return new DocRegistry(tmp);
+  const reg = new DocRegistry({ filePath: tmp });
+  // init() is async — callers that need it must await reg.init() themselves.
+  // For mock/offline tests the registry degrades to JSON, so init() resolves quickly.
+  return reg;
 }
 
 function buildMockUnified(opts = {}) {
@@ -252,6 +255,7 @@ async function setupRealTests() {
     await assert.assertTrue(statsBefore.tripleCount >= 1, 'seeded a stale triple');
 
     const registry = tempRegistry();
+    await registry.init();
     const result = await pipeline.run('./examples', registry);
 
     await assert.assertEqual(result.success, true, 'injection succeeds');
@@ -262,6 +266,7 @@ async function setupRealTests() {
     await assert.assertEqual(stale.length, 0, 'stale triple is removed after full rebuild');
 
     await graphStore.clear();
+    await registry.close();
     fs.unlinkSync(registry.filePath);
   });
 
@@ -290,6 +295,7 @@ async function setupRealTests() {
       { id: 'b.md', content: 'HIV causes AIDS', metadata: { file: 'b.md', size: 20, mtime: 1000 } },
     ];
     const registry = tempRegistry();
+    await registry.init();
     // We bypass the loader and feed docs directly via a temporary registry + runIncremental.
     // But runIncremental reads from loader. So we use a mock loader pattern:
     const currentDocs = [];
@@ -329,6 +335,7 @@ async function setupRealTests() {
     await assert.assertTrue(aztTriples.some(t => t.subject === 'azt' && t.object === 'hiv'), 'AZT->HIV triple exists from changed doc');
 
     await graphStore.clear();
+    await registry.close();
     fs.unlinkSync(registry.filePath);
   });
 

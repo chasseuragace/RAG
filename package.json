@@ -8,6 +8,7 @@
     "test": "node rag-server.js --test",
     "test:delta": "node rag-server.js --delta-test",
     "test:chroma": "node rag-server.js --chroma-test",
+    "test:infra": "node rag-server.js --infra-test",
     "server": "node rag-server.js --server",
     "dev": "node rag-server.js --server --port 3000",
     "help": "node rag-server.js"

@@ -16,6 +16,7 @@ const { MockEmbedder } = require('../retrieval/embedders/mock');
 const { GeminiEmbedder } = require('../retrieval/embedders/gemini');
 const { ChromaVectorStore } = require('../retrieval/stores/chroma');
 const { BM25Store } = require('../retrieval/stores/bm25');
+const { PostgresBM25Store } = require('../retrieval/stores/postgres-bm25');
 const { HybridStore } = require('../retrieval/stores/hybrid');
 const { MockReranker } = require('../retrieval/rerankers/mock');
 const { CrossEncoderReranker } = require('../retrieval/rerankers/real');
@@ -85,6 +86,7 @@ class RAGServer {
 
   async initialize() {
     this.registry = new DocRegistry();
+    await this.registry.init();
 
     // ── Shared NER / graph / authority components (same interfaces for both modes) ──
     const ner          = new MockEntityExtractor();
@@ -118,7 +120,8 @@ class RAGServer {
     if (this.isReal) {
       const embedder  = new GeminiEmbedder();
       const store     = new ChromaVectorStore();
-      const bm25      = new BM25Store();
+      const bm25      = new PostgresBM25Store();
+      await bm25.init();
       const hybrid    = new HybridStore(store, bm25);
       const loader    = new RealDocumentLoader();
       const baseReranker  = new CrossEncoderReranker();
@@ -288,7 +291,7 @@ await this.injectionPipeline.run('/mock', this.registry);
       case 'request:clear':
         await this.store.clear();
         await this.graphStore.clear();
-        this._resetRegistry();
+        await this._resetRegistry();
         this._wsSend(ws, { type: 'clear:result', data: { success: true } });
         break;
       case 'request:retrieve':
@@ -453,7 +456,8 @@ await this.injectionPipeline.run('/mock', this.registry);
     }
     else if (url === '/clear' && req.method === 'POST') {
       Promise.all([this.store.clear(), this.graphStore.clear()])
-        .then(() => { this._resetRegistry(); res.end(JSON.stringify({ success: true })); })
+        .then(() => this._resetRegistry())
+        .then(() => { res.end(JSON.stringify({ success: true })); })
         .catch(e => { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); });
     }
       else if (url === '/retrieve' && req.method === 'POST') {
@@ -579,6 +583,20 @@ await this.injectionPipeline.run('/mock', this.registry);
         console.warn('Error closing thread manager:', err.message);
       }
     }
+    if (this.registry) {
+      try {
+        await this.registry.close();
+      } catch (err) {
+        console.warn('Error closing registry:', err.message);
+      }
+    }
+    if (this.bm25Store && typeof this.bm25Store.close === 'function') {
+      try {
+        await this.bm25Store.close();
+      } catch (err) {
+        console.warn('Error closing BM25 store:', err.message);
+      }
+    }
     if (this.graphStore && typeof this.graphStore.close === 'function') {
       try {
         await this.graphStore.close();
@@ -592,10 +610,9 @@ await this.injectionPipeline.run('/mock', this.registry);
   // it. The next incremental run then treats every file as newly added.
   // @gotcha Calling /clear before /inject-incremental forces a full re-embed of
   //       the entire corpus, defeating the purpose of incremental sync.
-  _resetRegistry() {
+  async _resetRegistry() {
     if (!this.registry) return;
-    this.registry.docs = {};
-    this.registry._save();
+    await this.registry.replaceAll({});
   }
 }
 

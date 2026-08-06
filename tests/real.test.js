@@ -186,6 +186,8 @@ async function setupRealTests() {
     );
 
     const registry = new (require('../src/ingestion/registry').DocRegistry)();
+    await registry.init();
+    await registry.replaceAll({});
     const result = await pipeline.run('./examples', registry);
     await assert.assertEqual(result.success, true, 'Injection should succeed');
 
@@ -193,6 +195,7 @@ async function setupRealTests() {
     await assert.assertTrue(stats.tripleCount >= 0, 'Should have non-negative triple count');
 
     await graphStore.clear();
+    await registry.close();
   });
 
   return runner;
