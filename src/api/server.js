@@ -45,7 +45,6 @@ const { createThreadManager } = require('../session/thread-manager-factory');
 const { TokenCounter } = require('../shared/token-counter');
 const { MessageSummarizer } = require('../shared/message-summarizer');
 const { ContextWindowManager } = require('../shared/context-window-manager');
-const { Message } = require('../shared/interfaces');
 
 // public/ lives at the project root, one level above src/
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
@@ -159,7 +158,7 @@ class RAGServer {
         this.unifiedPipeline,
         this.threadManager,
         this.contextWindowManager,
-        { systemPrompt: BASE_SYSTEM_PROMPT, responseMaxTokens: RESPONSE_MAX_TOKENS }
+        { systemPrompt: BASE_SYSTEM_PROMPT, responseMaxTokens: RESPONSE_MAX_TOKENS, inference: this.inference }
       );
 
       // Graph-RAG: dual-path parallel retrieval + context fusion + authority-aware rerank
@@ -214,7 +213,7 @@ class RAGServer {
         this.unifiedPipeline,
         this.threadManager,
         this.contextWindowManager,
-        { systemPrompt: BASE_SYSTEM_PROMPT, responseMaxTokens: RESPONSE_MAX_TOKENS }
+        { systemPrompt: BASE_SYSTEM_PROMPT, responseMaxTokens: RESPONSE_MAX_TOKENS, inference: this.inference }
       );
 
       // Graph-RAG: dual-path parallel retrieval + context fusion + authority-aware rerank
@@ -302,43 +301,23 @@ await this.injectionPipeline.run('/mock', this.registry);
         if (ws.readyState !== 1) return;
         const sessionId = payload.sessionId || `anon_${Date.now()}_${Math.random().toString(36).substr(2, 8)}`;
         const topK = payload.topK || 3;
-        const graphRagResult = await this.graphRagPipeline.run(payload.query, topK, abortSignal);
+        const agResult = await this.agenticPipeline.run(payload.query, topK, sessionId, abortSignal);
         if (abortSignal?.aborted) return;
-        if (!graphRagResult.success) throw new Error(graphRagResult.error);
-        const contextDocs = graphRagResult.vectorChunks.map(r => ({
-          id: r.id,
-          content: r.metadata?.content || '',
-          metadata: r.metadata
-        }));
-
-         let answer;
-         const thread = await this.threadManager.getOrCreate(sessionId, abortSignal);
-         const userMsg = Message.create('user', payload.query);
-         await this.threadManager.addMessage(sessionId, userMsg, abortSignal);
-         const updatedThread = await this.threadManager.getThread(sessionId, abortSignal);
-         const contextPayload = await this.contextWindowManager.buildContext(
-           updatedThread,
-           BASE_SYSTEM_PROMPT,
-           contextDocs,
-           RESPONSE_MAX_TOKENS,
-           abortSignal
-         );
-         answer = await this.inference.generateChat(contextPayload.messages, {}, abortSignal);
-         const assistantMsg = Message.create('assistant', answer);
-         await this.threadManager.addMessage(sessionId, assistantMsg, abortSignal);
-
+        if (!agResult.success) throw new Error(agResult.error);
         this._wsSend(ws, {
           type: 'ask:result',
           data: {
-            success: true,
-            query:          payload.query,
-            expandedQuery:  graphRagResult.expandedQuery,
-            entities:       graphRagResult.entities,
-            answer,
-            sources:        graphRagResult.vectorChunks,
-            graphFacts:     graphRagResult.context.graphFacts,
-            graphPaths:     graphRagResult.graphPaths,
-            sessionId,
+            success:       true,
+            query:         payload.query,
+            expandedQuery: agResult.expandedQuery,
+            entities:      agResult.entities,
+            answer:        agResult.answer,
+            sources:       agResult.results,
+            graphFacts:    agResult.graphFacts,
+            sessionId:     agResult.sessionId,
+            assessment:    agResult.assessment,
+            finalAction:   agResult.finalAction,
+            trace:         agResult.trace,
           }
         });
         break;
@@ -483,46 +462,23 @@ await this.injectionPipeline.run('/mock', this.registry);
         req.on('end', async () => {
           try {
             const { query, sessionId, topK = 3 } = JSON.parse(body);
-            const sid  = sessionId || `http_${Date.now()}_${Math.random().toString(36).substr(2, 8)}`;
-            const topKVal = topK;
-            const graphRagResult = await this.graphRagPipeline.run(query, topKVal, ac.signal);
+            const sid = sessionId || `http_${Date.now()}_${Math.random().toString(36).substr(2, 8)}`;
+            const agResult = await this.agenticPipeline.run(query, topK, sid, ac.signal);
             if (ac.signal.aborted) return;
-            if (!graphRagResult.success) throw new Error(graphRagResult.error);
-
-            const contextDocs = graphRagResult.vectorChunks.map(r => ({
-              id: r.id,
-              content: r.metadata?.content || '',
-              metadata: r.metadata
-            }));
-
-            let answer;
-            const thread = await this.threadManager.getOrCreate(sid, ac.signal);
-            const userMsg = Message.create('user', query);
-            await this.threadManager.addMessage(sid, userMsg, ac.signal);
-            const updatedThread = await this.threadManager.getThread(sid, ac.signal);
-            const contextPayload = await this.contextWindowManager.buildContext(
-              updatedThread,
-              BASE_SYSTEM_PROMPT,
-              contextDocs,
-              RESPONSE_MAX_TOKENS,
-              ac.signal
-            );
-            if (ac.signal.aborted) return;
-            answer = await this.inference.generateChat(contextPayload.messages, {}, ac.signal);
-            if (ac.signal.aborted) return;
-            const assistantMsg = Message.create('assistant', answer);
-            await this.threadManager.addMessage(sid, assistantMsg, ac.signal);
-
+            if (!agResult.success) throw new Error(agResult.error);
             res.writeHead(200);
             res.end(JSON.stringify({
-              success: true,
+              success:       true,
               query,
-              expandedQuery: graphRagResult.expandedQuery,
-              entities:      graphRagResult.entities,
-              answer,
-              sources:       graphRagResult.vectorChunks,
-              graphFacts:    graphRagResult.context.graphFacts,
-              sessionId:     sid,
+              expandedQuery: agResult.expandedQuery,
+              entities:      agResult.entities,
+              answer:        agResult.answer,
+              sources:       agResult.results,
+              graphFacts:    agResult.graphFacts,
+              sessionId:     agResult.sessionId,
+              assessment:    agResult.assessment,
+              finalAction:   agResult.finalAction,
+              trace:         agResult.trace,
             }, null, 2));
           } catch(e) { if (ac.signal.aborted) return; res.writeHead(400); res.end(JSON.stringify({ error: e.message })); }
         });

@@ -1,5 +1,5 @@
 class Observation {
-  constructor({ query, sessionId = null, originalQuery, topK, results = [], rerankedResults = [], previousActions = [], iteration = 0, topScore = 0, assessment = null, decision = null, trace = null, goal = null, thread = null, contextPayload = null }) {
+  constructor({ query, sessionId = null, originalQuery, topK, results = [], rerankedResults = [], previousActions = [], iteration = 0, topScore = 0, assessment = null, decision = null, trace = null, goal = null, thread = null, contextPayload = null, expandedQuery = null, entities = null, graphFacts = null }) {
     this.query = query;
     this.sessionId = sessionId;
     this.originalQuery = originalQuery || query;
@@ -15,6 +15,9 @@ class Observation {
     this.goal = goal;
     this.thread = thread;
     this.contextPayload = contextPayload;
+    this.expandedQuery = expandedQuery || query;
+    this.entities     = entities     || {};
+    this.graphFacts   = graphFacts   || [];
   }
 
   static create(query, topK = 5, goal = null, sessionId = null) {
@@ -50,6 +53,15 @@ class Observation {
 
   withContextPayload(contextPayload) {
     return new Observation({ ...this, contextPayload });
+  }
+
+  withEnrichment({ expandedQuery, entities, graphFacts } = {}) {
+    return new Observation({
+      ...this,
+      expandedQuery: expandedQuery || this.expandedQuery || this.query,
+      entities:      entities      || this.entities      || {},
+      graphFacts:    graphFacts    || this.graphFacts    || [],
+    });
   }
 }
 

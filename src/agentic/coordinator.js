@@ -10,10 +10,60 @@ class Coordinator {
     this.executor = executor;
     this.threadManager = threadManager;
     this.contextWindowManager = contextWindowManager;
+    this.inference = options.inference || null;
     this.systemPrompt = options.systemPrompt || 'You are a helpful retrieval assistant.';
     this.responseMaxTokens = options.responseMaxTokens || 1000;
     this._addedQueries = new Set();
   }
+
+  // ── Answer generation ──────────────────────────────────────────────────────
+
+  /**
+   * Call inference with the built context payload, persist the assistant
+   * message to the thread, and return the answer string.
+   * Returns null silently if inference is not wired or context is missing.
+   */
+  async _generateAnswer(obs, abortSignal = null) {
+    if (!this.inference) return null;
+    if (!obs.contextPayload || !obs.contextPayload.messages) return null;
+    try {
+      const answer = await this.inference.generateChat(
+        obs.contextPayload.messages, {}, abortSignal
+      );
+      if (this.threadManager && obs.sessionId) {
+        const assistantMsg = Message.create('assistant', answer);
+        await this.threadManager.addMessage(obs.sessionId, assistantMsg).catch(() => {});
+      }
+      serverEvents.logEvent('agentic:answer:generated', {
+        sessionId: obs.sessionId,
+        length: answer?.length,
+      });
+      return answer;
+    } catch (err) {
+      serverEvents.logEvent('agentic:answer:error', { message: err.message });
+      return null;
+    }
+  }
+
+  // ── Standardised return shape ──────────────────────────────────────────────
+
+  _finalReturn(obs, assessment, decision, trace, start, extraFields = {}) {
+    return {
+      ...obs,
+      assessment,
+      decision,
+      trace,
+      finalAction: { type: decision.action, reason: decision.rationale, evidence: decision.evidence },
+      duration: `${Date.now() - start}ms`,
+      // Enrichment fields bubbled up from the last UnifiedPipeline search
+      expandedQuery: obs.expandedQuery || obs.query,
+      entities:      obs.entities      || {},
+      graphFacts:    obs.graphFacts    || [],
+      ...extraFields,
+    };
+  }
+
+  // ── Context building ───────────────────────────────────────────────────────
 
   async _buildContext(obs) {
     if (!this.threadManager || !this.contextWindowManager || !obs.query) {
@@ -26,7 +76,7 @@ class Coordinator {
     }
 
     try {
-      const thread = await this.threadManager.getOrCreate(sessionId);
+      await this.threadManager.getOrCreate(sessionId);
 
       const queryKey = `${sessionId}::${obs.query}`;
       if (!this._addedQueries.has(queryKey)) {
@@ -38,9 +88,9 @@ class Coordinator {
         ? obs.rerankedResults
         : obs.results;
       const ragContext = ragResults.map(r => ({
-        id: r.id,
+        id:      r.id,
         content: (r.metadata && r.metadata.content) || r.content || '',
-        score: r.score,
+        score:   r.score,
       }));
 
       const updatedThread = await this.threadManager.getThread(sessionId);
@@ -57,14 +107,14 @@ class Coordinator {
       if (!this._contextRetryAttempted) {
         this._contextRetryAttempted = true;
         try {
-          const thread = await this.threadManager.getOrCreate(sessionId);
+          await this.threadManager.getOrCreate(sessionId);
           const ragResults = obs.rerankedResults && obs.rerankedResults.length > 0
             ? obs.rerankedResults
             : obs.results;
           const ragContext = ragResults.map(r => ({
-            id: r.id,
+            id:      r.id,
             content: (r.metadata && r.metadata.content) || r.content || '',
-            score: r.score,
+            score:   r.score,
           }));
           const updatedThread = await this.threadManager.getThread(sessionId);
           const contextPayload = await this.contextWindowManager.buildContext(
@@ -78,16 +128,34 @@ class Coordinator {
           serverEvents.logEvent('agentic:context:retry-failed', { message: retryErr.message });
         }
       }
-      serverEvents.logEvent('agentic:context:degraded', { message: 'context build failed, proceeding without context' });
+      serverEvents.logEvent('agentic:context:degraded', {
+        message: 'context build failed, proceeding without context',
+      });
       return obs;
     }
   }
+
+  // ── Main loop ──────────────────────────────────────────────────────────────
 
   async run(observation, goal) {
     const start = Date.now();
     const trace = observation.trace || new Trace();
     let obs = observation;
     let remaining = goal.latencyBudget;
+
+    // ── Cold-start: run an initial search before the first judge pass so the
+    // judge never evaluates an empty result set. This saves one wasted LLM
+    // judge call and ensures the context payload is populated from iteration 0.
+    if (obs.results.length === 0 && obs.rerankedResults.length === 0) {
+      obs = await this.executor.execute({ action: 'search' }, obs);
+      trace.add(new TraceEvent({
+        timestamp: Date.now(),
+        iteration: 0,
+        phase: 'execute',
+        action: { action: 'search', reason: 'cold_start' },
+        timing: { ms: 0 },
+      }));
+    }
 
     for (let i = 0; i < goal.maxIterations; i++) {
       const iterStart = Date.now();
@@ -105,7 +173,7 @@ class Coordinator {
         iteration: i,
         phase: 'judge',
         assessment,
-        timing: { ms: Date.now() - iterStart }
+        timing: { ms: Date.now() - iterStart },
       }));
 
       const decision = await this.policy.resolve(assessment, goal, trace, obs);
@@ -114,7 +182,7 @@ class Coordinator {
         iteration: i,
         phase: 'policy',
         decision,
-        timing: { ms: Date.now() - iterStart }
+        timing: { ms: Date.now() - iterStart },
       }));
 
       if (decision.action === 'answer' || decision.action === 'stop') {
@@ -123,14 +191,10 @@ class Coordinator {
           action: decision.action,
           reason: decision.rationale,
         });
-        return {
-          ...obs,
-          assessment,
-          decision,
-          trace,
-          finalAction: { type: decision.action, reason: decision.rationale, evidence: decision.evidence },
-          duration: `${Date.now() - start}ms`,
-        };
+        const answer = decision.action === 'answer'
+          ? await this._generateAnswer(obs)
+          : null;
+        return this._finalReturn(obs, assessment, decision, trace, start, { answer });
       }
 
       if (remaining < 50) {
@@ -139,14 +203,10 @@ class Coordinator {
           action: 'stop',
           reason: 'latency_budget_exceeded',
         });
-        return {
-          ...obs,
-          assessment,
-          decision: Decision.create('stop', 'latency_budget_exceeded', { remainingBudgetMs: remaining }),
-          trace,
-          finalAction: { type: 'stop', reason: 'latency_budget_exceeded', evidence: { remainingBudgetMs: remaining } },
-          duration: `${Date.now() - start}ms`,
-        };
+        const timeoutDecision = Decision.create(
+          'stop', 'latency_budget_exceeded', { remainingBudgetMs: remaining }
+        );
+        return this._finalReturn(obs, assessment, timeoutDecision, trace, start, { answer: null });
       }
 
       obs = await this.executor.execute(decision, obs, remaining);
@@ -156,29 +216,28 @@ class Coordinator {
         iteration: i,
         phase: 'execute',
         action: decision,
-        timing: { ms: actionMs }
+        timing: { ms: actionMs },
       }));
 
-      if (actionMs > remaining) {
-        remaining = 0;
-      } else {
-        remaining -= actionMs;
-      }
+      remaining = actionMs > remaining ? 0 : remaining - actionMs;
     }
 
+    // maxIterations reached — do a final judge+policy pass
     const finalAssessment = await this.judge.evaluate(obs);
-    const finalDecision = await this.policy.resolve(finalAssessment, { ...goal, finalPass: true }, trace, obs);
-    const resolvedAction = (finalDecision.action === 'answer') ? 'answer' : 'stop';
-    const resolvedRationale = (finalDecision.action === 'answer')
+    const finalDecision = await this.policy.resolve(
+      finalAssessment, { ...goal, finalPass: true }, trace, obs
+    );
+    const resolvedAction = finalDecision.action === 'answer' ? 'answer' : 'stop';
+    const resolvedRationale = finalDecision.action === 'answer'
       ? finalDecision.rationale
       : `max_iterations_reached (policy wanted: ${finalDecision.action} — ${finalDecision.rationale})`;
-    const resolvedEvidence = (finalDecision.action === 'answer')
+    const resolvedEvidence = finalDecision.action === 'answer'
       ? finalDecision.evidence
       : {
-          iterations: goal.maxIterations,
-          wantedAction: finalDecision.action,
-          wantedRationale: finalDecision.rationale,
-          wantedEvidence: finalDecision.evidence,
+          iterations:       goal.maxIterations,
+          wantedAction:     finalDecision.action,
+          wantedRationale:  finalDecision.rationale,
+          wantedEvidence:   finalDecision.evidence,
         };
 
     serverEvents.logEvent('agentic:strategy:complete', {
@@ -186,16 +245,14 @@ class Coordinator {
       action: resolvedAction,
       reason: resolvedRationale,
     });
-    return {
-      ...obs,
-      assessment: finalAssessment,
-      decision: finalDecision.action === 'answer'
-        ? finalDecision
-        : Decision.create('stop', resolvedRationale, resolvedEvidence),
-      trace,
-      finalAction: { type: resolvedAction, reason: resolvedRationale, evidence: resolvedEvidence },
-      duration: `${Date.now() - start}ms`,
-    };
+
+    const finalDecisionObj = finalDecision.action === 'answer'
+      ? finalDecision
+      : Decision.create('stop', resolvedRationale, resolvedEvidence);
+    const answer = resolvedAction === 'answer'
+      ? await this._generateAnswer(obs)
+      : null;
+    return this._finalReturn(obs, finalAssessment, finalDecisionObj, trace, start, { answer });
   }
 }
 

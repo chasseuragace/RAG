@@ -44,12 +44,18 @@ class RetrievalExecutor {
     const query = queryOverride || observation.query;
     const start = Date.now();
     let reranked;
+    let enrichment = null;
     if (this.unifiedPipeline) {
       const fused = await this.unifiedPipeline.retrieve(query, { topK: topK * 4 });
       const pool = fused.candidates || [];
       reranked = this.reranker && pool.length > 0
         ? await this.reranker.rerank(query, pool)
         : pool;
+      enrichment = {
+        expandedQuery: fused.expandedQuery || query,
+        entities:      fused.entities      || {},
+        graphFacts:    fused.graphFacts    || [],
+      };
       serverEvents.logEvent('agentic:search', { query, topK, resultCount: reranked.length, duration: Date.now() - start, actionType, mode: 'unified' });
     } else {
       const qEmb = await this.embedder.embed(query);
@@ -57,7 +63,8 @@ class RetrievalExecutor {
       reranked = this.reranker ? await this.reranker.rerank(query, candidates) : candidates;
       serverEvents.logEvent('agentic:search', { query, topK, resultCount: reranked.length, duration: Date.now() - start, actionType });
     }
-    const newObs = observation.withResults(reranked);
+    let newObs = observation.withResults(reranked);
+    if (enrichment) newObs = newObs.withEnrichment(enrichment);
     return newObs.withAction({ type: actionType, query, resultCount: reranked.length, duration: Date.now() - start });
   }
 }

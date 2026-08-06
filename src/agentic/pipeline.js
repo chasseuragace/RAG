@@ -8,6 +8,22 @@ const { RetrievalExecutor } = require('./executor');
 const { serverEvents } = require('../shared/events');
 
 class AgenticRetrievalPipeline extends RetrievalPipeline {
+  /**
+   * @param {Embedder}             embedder
+   * @param {HybridStore}          hybridStore
+   * @param {Reranker}             reranker
+   * @param {object}               goal
+   * @param {RetrievalPolicy}      [policy]
+   * @param {RetrievalJudge}       [judge]
+   * @param {QueryRewriter}        [queryRewriter]
+   * @param {UnifiedRetrievalPipeline} [unifiedPipeline]
+   * @param {ThreadManager}        [threadManager]
+   * @param {ContextWindowManager} [contextWindowManager]
+   * @param {object}               [options]
+   * @param {string}               [options.systemPrompt]
+   * @param {number}               [options.responseMaxTokens]
+   * @param {object}               [options.inference]  — any object with generateChat(messages, opts, signal)
+   */
   constructor(embedder, hybridStore, reranker, goal, policy, judge, queryRewriter, unifiedPipeline = null, threadManager = null, contextWindowManager = null, options = {}) {
     super(embedder, hybridStore);
     this.embedder = embedder;
@@ -21,6 +37,7 @@ class AgenticRetrievalPipeline extends RetrievalPipeline {
     };
     this.threadManager = threadManager;
     this.contextWindowManager = contextWindowManager;
+    this.inference = options.inference || null;
     this.systemPrompt = options.systemPrompt || 'You are a helpful retrieval assistant.';
     this.responseMaxTokens = options.responseMaxTokens || 1000;
     this._sessionId = null;
@@ -34,6 +51,7 @@ class AgenticRetrievalPipeline extends RetrievalPipeline {
     const coordinator = new Coordinator(judgeInstance, policyInstance, executor, threadManager, contextWindowManager, {
       systemPrompt: this.systemPrompt,
       responseMaxTokens: this.responseMaxTokens,
+      inference: this.inference,
     });
     return async (observation, maxIterations) => coordinator.run(observation, { ...this.goal, maxIterations });
   }
@@ -60,6 +78,13 @@ class AgenticRetrievalPipeline extends RetrievalPipeline {
       return {
         success: true,
         query,
+        // Enriched query fields (populated when UnifiedPipeline ran)
+        expandedQuery:  result.expandedQuery  || query,
+        entities:       result.entities       || {},
+        graphFacts:     result.graphFacts      || [],
+        // Answer (populated when inference is wired and coordinator answered)
+        answer:         result.answer         || null,
+        sessionId:      sid,
         resultsCount: final.length,
         duration: `${duration}ms`,
         assessment: result.assessment ? { quality: result.assessment.quality, completeness: result.assessment.completeness, consistency: result.assessment.consistency, sourceDiversity: result.assessment.sourceDiversity, missingEvidence: result.assessment.missingEvidence } : null,

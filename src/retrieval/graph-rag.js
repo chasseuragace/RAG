@@ -1,13 +1,15 @@
 /**
- * GraphRAGPipeline — dual-path retrieval combining:
+ * GraphRAGPipeline — dual-path retrieval combining graph traversal + hybrid search.
  *
- *   Path A (Structural)  : Graph traversal → verified triples / relational paths
- *   Path B (Semantic)    : NER-enriched hybrid retrieval → top-K text chunks
+ * @deprecated Use AgenticRetrievalPipeline (backed by UnifiedRetrievalPipeline) instead.
+ * GraphRAGPipeline was the original /ask path. It has been superseded by the agentic
+ * pipeline which unifies graph traversal, hybrid search, NER enrichment, acronym
+ * expansion, metadata filtering, authority-aware reranking, and the judge/policy
+ * quality-control loop into one coherent pipeline.
  *
- * Both paths run in parallel.  Results are merged by the ContextFuser and
- * optionally re-ranked before being returned to the caller / LLM.
+ * Retained for reference and potential lightweight non-agentic use cases.
+ * Will be removed in a future release.
  *
- * ─── Runtime flow ─────────────────────────────────────────────────────────
  *
  *   query
  *    │
