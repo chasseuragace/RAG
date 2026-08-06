@@ -30,27 +30,27 @@ flowchart TB
         Glossary["PostgresAcronymGlossary\n(manually maintained lookup table;\nnot populated by ingestion — requires explicit register() calls)"]
     end
 
-    Reranker["AuthorityAwareReranker  ← shared component\n(real: wraps CrossEncoderReranker + StaticDictionaryScorer;\nmock: wraps MockReranker + StaticDictionaryScorer)\nUsed by both /retrieve and the agentic ExecN"]
+    Reranker["AuthorityAwareReranker  ← shared component\n(real: wraps CrossEncoderReranker + StaticDictionaryScorer;\nmock: wraps MockReranker + StaticDictionaryScorer)\nSame instance injected into both /retrieve and ExecN"]
 
-    subgraph RetrievalA["🔍 /retrieve — NEREnrichedRetrievalPipeline\n(diagnostic endpoint — same expand→NER→filter→hybrid steps\nas UnifiedP but no graph traversal, no agentic loop;\nuse for direct search testing and benchmarking)"]
+    subgraph RetrievalA["🔍 /retrieve — NEREnrichedRetrievalPipeline\n(diagnostic endpoint — no graph traversal, no agentic loop)\nSteps 1–3 are independently implemented from UnifiedP but\nuse the same injected collaborators (ner, glossary, filter objects)"]
         direction TB
-        QPA["1. PostgresAcronymGlossary.expand(query)"]
-        NERA["2. MockEntityExtractor.extract(expandedQuery)"]
-        FilterA["3. MockMetadataFilter.build(entities) → post-filter candidates"]
+        QPA["1. glossary.expand(query)"]
+        NERA["2. ner.extract(expandedQuery)"]
+        FilterA["3. filter.build(entities) → post-filter candidates"]
         HybridA["4. HybridStore: Chroma (dense) + PostgresBM25Store (BM25) + RRF\n   candidateK = topK × 4"]
     end
 
     subgraph AgenticLoop["🧠 AgenticRetrievalPipeline — primary /ask pipeline\n(Coordinator loop, bounded by maxIterations + latencyBudget)"]
         direction TB
-        ColdStart["Cold-start guard\nif results=[] AND rerankedResults=[]\n  → call ExecN for initial search before judge/policy loop\nelse → proceed directly to BuildCtx\n(idempotent: if results already present, ExecN skips to BuildCtx instantly)"]
-        BuildCtx["Coordinator._buildContext()\n• add user message to thread (deduped by sessionId+query key)\n• ContextWindowManager.buildContext() over thread history\n  + reranked results + graphFacts → contextPayload\n• summarisation fires here when token budget exceeded"]
-        JudgeN["Judge.evaluate(observation) → RetrievalAssessment\n• runs AFTER BuildCtx so it always sees windowed context\n• RetrievalJudge: heuristic (always fast)\n• LLMJudge: wraps heuristic, escalates to LLM only in gray zone 0.4–0.7"]
-        PolicyN["Policy.resolve() → Decision  (action + rationale + evidence)\n• HeuristicRetrievalPolicy (mock) / LLMPolicy (real)\n• LLMPolicy falls back to heuristic on inference failure"]
-        TimeoutGuard["Latency budget check\nif remainingBudget < 50ms → Decision.create('stop', 'latency_budget_exceeded')\n→ skip remaining iterations, exit loop immediately"]
-        ExecN["RetrievalExecutor.execute(decision)\n• search / increase_topk → UnifiedP.retrieve() then Reranker.rerank()\n• rewrite_query → QueryRewriter → re-search via UnifiedP\n• answer / stop → exit loop\nAttaches expandedQuery + entities + graphFacts to Observation"]
+        ColdStart["Cold-start guard\nif obs.results=[] AND obs.rerankedResults=[]\n  → force one ExecN search before the counted loop begins\nelse → enter loop directly at BuildCtx\n(every fresh /ask hits the search branch;\nthe skip-search branch is only exercised by pre-seeded Observations)"]
+        BuildCtx["Coordinator._buildContext()\n• add user message to thread (deduped by sessionId+query)\n• ContextWindowManager.buildContext() over thread history\n  + reranked results + graphFacts → contextPayload\n• summarisation fires here when token budget exceeded"]
+        JudgeN["Judge.evaluate(observation) → RetrievalAssessment\n• runs AFTER BuildCtx — always sees windowed context\n• RetrievalJudge: heuristic\n• LLMJudge: wraps heuristic, escalates to LLM in gray zone 0.4–0.7"]
+        PolicyN["Policy.resolve() → Decision  (action + rationale + evidence)\n• HeuristicRetrievalPolicy (mock) / LLMPolicy (real)\nDecision.action ∈ { answer | stop | search | increase_topk | rewrite_query }"]
+        ExecN["RetrievalExecutor.execute(decision)\n• search / increase_topk → UnifiedP.retrieve() then Reranker.rerank()\n• rewrite_query → QueryRewriter → re-search via UnifiedP\n• answer / stop → no-op, loop exits before reaching here\nAttaches expandedQuery + entities + graphFacts to Observation"]
         Rewriter["LLMQueryRewriter (real) / HeuristicQueryRewriter (mock)"]
-        UnifiedP["UnifiedRetrievalPipeline.retrieve()\n1. PostgresAcronymGlossary.expand(query)\n2. MockEntityExtractor.extract(expandedQuery)\n3. MockMetadataFilter.build(entities)\n4. Parallel: HybridStore (dense+BM25+RRF) ‖ Neo4jGraphStore.queryByEntities\n5. MockContextFuser.fuse(graphPaths, vectorChunks) → candidates + graphFacts\nNote: reranking is NOT done here — ExecN applies Reranker after retrieve()"]
-        GenerateN["Coordinator._generateAnswer()\n• inference.generateChat(contextPayload.messages)\n• PostgresThreadManager.addMessage(assistant turn)\n• returns answer string (null if inference not wired)"]
+        UnifiedP["UnifiedRetrievalPipeline.retrieve()\n1. glossary.expand(query)   — same collaborator object as /retrieve\n2. ner.extract(expandedQuery) — same collaborator object as /retrieve\n3. filter.build(entities)     — same collaborator object as /retrieve\n4. Parallel: HybridStore (dense+BM25+RRF) ‖ Neo4jGraphStore.queryByEntities\n5. ContextFuser.fuse → candidates + graphFacts\nReranking is NOT done here — ExecN applies Reranker after retrieve()"]
+        TimeoutGuard["Latency budget check\n(checked at end of each iteration, after ExecN completes)\nif remainingBudget < 50ms → force stop regardless of policy\nanswer/stop decisions bypass this — they exit before this check"]
+        GenerateN["Coordinator._generateAnswer()\n• inference.generateChat(contextPayload.messages)\n• calls ThreadMgr.addMessage(assistant turn)\n  (same ThreadMgr — same graceful degradation protection)\n• returns answer string (null if inference not wired)"]
     end
 
     subgraph ContextMgmt["💬 Context & Thread Management"]
@@ -68,8 +68,8 @@ flowchart TB
     end
 
     subgraph Evaluation["🧪 Evaluation (EXPERT_MODE only)"]
-        GoldenDS["GoldenDataset\n(captureFixture: runs full agentic loop, saves trace + assessment;\nreplay: re-runs saved fixtures through any policy for regression testing)"]
-        Replay["ReplayHarness"]
+        GoldenDS["GoldenDataset\ncaptureFixture: runs full agentic loop → saves trace + assessment\n(expensive: hits all storage + inference)"]
+        Replay["ReplayHarness\nreplay: calls policy.resolve() with saved assessment+trace\nno storage, no retrieval, no inference — policy-logic only"]
     end
 
     subgraph Observability["📊 Observability"]
@@ -83,25 +83,25 @@ flowchart TB
     Events -.->|"push events to connected clients"| WSc
 
     %% ── /clear ───────────────────────────────────────────────────────────
-    %% this.store = HybridStore → .clear() calls vectorStore.clear() + bm25Store.clear()
+    %% this.store = HybridStore → .clear() internally calls
+    %% vectorStore.clear() (Chroma) AND bm25Store.clear() (bm25_chunks).
     %% Thread/conversation history in Postgres is NOT cleared.
-    Server -->|"/clear → HybridStore.clear()\n(Chroma + BM25 both wiped)"| Chroma
-    Server -.->|"/clear (via HybridStore)"| BM25db
+    Server -->|"/clear → HybridStore.clear() → Chroma + BM25 wiped"| Chroma
+    Server -.->|"/clear (via HybridStore.clear())"| BM25db
     Server -.->|"/clear → graphStore.clear()"| Neo4j
     Server -.->|"/clear → registry.replaceAll({})"| Registry
 
     %% ── Ingestion (/inject full rebuild; /inject-incremental delta sync) ─
     Server -->|"/inject  /inject-incremental"| Loader
     Loader --> Chunker --> Annotator --> NERTag --> RelExtract --> Embedder
-    Embedder -->|"embedBatch → upsert vectors (real: Gemini embed)"| Chroma
+    Embedder -->|"embedBatch → upsert vectors (real: Gemini)"| Chroma
     Embedder -->|"index chunks → bm25_chunks upsert"| BM25db
     RelExtract -->|"storeTriples / replaceTriplesForDoc (atomic)"| Neo4j
     Embedder --> Registry
     Registry -.->|"upsert/delete doc_registry rows"| Postgres
     BM25db -.->|"backed by (same PG instance)"| Postgres
-    %% Incremental sync: deleteByDocId fires on changed/removed docs
-    Registry -.->|"deleteByDocId (changed/removed)"| Chroma
-    Registry -.->|"deleteByDocId (changed/removed)"| BM25db
+    Registry -.->|"deleteByDocId on changed/removed docs"| Chroma
+    Registry -.->|"deleteByDocId on changed/removed docs"| BM25db
     Registry -.->|"deleteByDocId / replaceTriplesForDoc"| Neo4j
 
     %% ── /retrieve (diagnostic — no agentic loop) ──────────────────────
@@ -115,17 +115,24 @@ flowchart TB
     Reranker -->|"ranked results response"| Server
 
     %% ── /ask — unified agentic pipeline ──────────────────────────────
+    %% Every fresh /ask arrives with results=[] so the cold-start
+    %% search branch always fires on normal traffic.
     Server -->|"/ask  sessionId  topK"| ColdStart
-    ColdStart -->|"results=[] → force initial search"| ExecN
-    ColdStart -->|"results already present → skip search"| BuildCtx
-    ExecN -->|"Observation with results → enter loop"| BuildCtx
+    ColdStart -->|"results=[] (every fresh /ask)"| ExecN
+    ColdStart -->|"results pre-seeded (Replay/test only)"| BuildCtx
+    ExecN -->|"Observation.withResults().withEnrichment()"| BuildCtx
     BuildCtx --> JudgeN --> PolicyN
-    PolicyN --> TimeoutGuard
-    TimeoutGuard -->|"budget ok → continue"| ExecN
-    TimeoutGuard -->|"budget exhausted → stop"| Server
+
+    %% PolicyN exits immediately on terminal decisions (before timeout check)
+    PolicyN -->|"answer"| GenerateN
+    PolicyN -->|"stop"| Server
+
+    %% PolicyN dispatches search-type decisions through ExecN
+    PolicyN -->|"search / increase_topk"| ExecN
     PolicyN -->|"rewrite_query"| Rewriter
     Rewriter --> ExecN
-    PolicyN -->|"search / increase_topk"| ExecN
+
+    %% ExecN calls UnifiedP then Reranker, then loops back
     ExecN --> UnifiedP
     UnifiedP -.->|"dense + BM25 + RRF"| Chroma
     UnifiedP -.->|"BM25 keyword"| BM25db
@@ -133,25 +140,32 @@ flowchart TB
     UnifiedP -.->|"expand query"| Glossary
     UnifiedP -->|"candidates + expandedQuery + entities + graphFacts"| ExecN
     ExecN -->|"Reranker.rerank(query, candidates)"| Reranker
-    Reranker -->|"reranked Observation"| ExecN
-    ExecN -->|"Observation.withResults().withEnrichment() → next iteration"| BuildCtx
+    Reranker -->|"reranked results"| ExecN
+
+    %% After ExecN completes: timeout check, then loop back to BuildCtx
+    ExecN --> TimeoutGuard
+    TimeoutGuard -->|"budget ok → next iteration"| BuildCtx
+    TimeoutGuard -->|"budget exhausted → force stop"| Server
+
+    %% Context & thread management (inside the loop via BuildCtx)
     BuildCtx --> ThreadMgr
     ThreadMgr -.->|"getOrCreate / addMessage (user turn)"| Postgres
     ThreadMgr --> CtxWindow
     CtxWindow --> Summarizer
     CtxWindow --> TokCtr
-    PolicyN -->|"answer"| GenerateN
+
+    %% GenerateN routes through ThreadMgr (same graceful degradation)
     GenerateN -->|"generateChat() (real)"| Novita
     GenerateN -.->|"mock mode"| MockInf
-    GenerateN -.->|"addMessage (assistant turn)"| Postgres
+    GenerateN -->|"ThreadMgr.addMessage (assistant turn)"| ThreadMgr
     GenerateN -->|"answer + sources + graphFacts + sessionId + trace"| Server
-    PolicyN -->|"stop"| Server
     Server --> UserZone
 
-    %% ── /capture-fixture ─────────────────────────────────────────────
+    %% ── /capture-fixture + Replay ─────────────────────────────────────
     Server -->|"/capture-fixture (EXPERT_MODE)"| GoldenDS
-    GoldenDS -->|"captureFixture: run full agentic loop, save trace+assessment"| AgenticLoop
+    GoldenDS -->|"captureFixture: run full agentic loop\n(hits all storage + inference)"| AgenticLoop
     GoldenDS --> Replay
+    Replay -->|"harness.run(): policy.resolve(savedAssessment, goal, trace)\nno retrieval, no inference, no storage"| PolicyN
 
     %% ── SSE + observability fan-in ───────────────────────────────────
     Events -.->|"stream"| SSE
@@ -167,6 +181,6 @@ flowchart TB
     classDef shared fill:#efe,stroke:#393,stroke-width:2px;
     class REST,WSc,SSE external;
     class Chroma,BM25db,Neo4j,Postgres,Glossary storage;
-    class ColdStart,BuildCtx,JudgeN,PolicyN,TimeoutGuard,ExecN,GenerateN loop;
+    class ColdStart,BuildCtx,JudgeN,PolicyN,ExecN,TimeoutGuard,GenerateN loop;
     class Reranker shared;
 ```
