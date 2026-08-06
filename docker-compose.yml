@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   chroma:
     image: ghcr.io/chroma-core/chroma:latest
@@ -11,5 +9,36 @@ services:
     volumes:
       - chroma-data:/chroma/data
 
+  neo4j:
+    image: neo4j:5.26.0
+    container_name: neo4j-db
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    environment:
+      - NEO4J_AUTH=neo4j/neo4j_password
+      # CRITICAL: Must be a valid JSON array with double quotes. Single quotes will be parsed
+      # as a string literal by YAML and silently ignored by Neo4j.
+      # Also requires container recreate (not restart) to take effect.
+      - NEO4J_PLUGINS=["apoc"]
+    volumes:
+      - neo4j-data:/data
+      - neo4j-logs:/logs
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres-db
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=rag_user
+      - POSTGRES_PASSWORD=rag_password
+      - POSTGRES_DB=rag_system
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
 volumes:
   chroma-data:
+  neo4j-data:
+  neo4j-logs:
+  postgres-data:
