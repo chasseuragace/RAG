@@ -98,12 +98,12 @@ async function setupRealTests() {
     await assert.assertEqual(stats.tripleCount, 2, 'Should have 2 triples');
     await assert.assertEqual(stats.entityCount, 3, 'Should have 3 entities');
 
-    const results = await store.queryByEntity('AZT', 1);
-    // @gotcha depth=1 → maxDepth=0, so only direct neighbors are returned.
-    //       This is correct here: AZT→HIV is a direct edge.
-    await assert.assertEqual(results.length, 1, 'Should find 1 triple for AZT');
-    await assert.assertEqual(results[0].predicate, 'TREATS', 'Should be TREATS predicate');
-    await assert.assertEqual(results[0].object, 'hiv', 'Should point to HIV');
+    const results = await store.queryByEntity('AZT', 2);
+    // @gotcha depth=2 → maxDepth=1, enabling 1-hop path expansion via apoc.path.expand.
+    //       With stored triples (AZT→HIV, HIV→AIDS), this should return both.
+    await assert.assertEqual(results.length, 2, 'Should find 2 triples for AZT via 1-hop expansion');
+    await assert.assertTrue(results.some(r => r.predicate === 'TREATS' && r.object === 'hiv'), 'Should include TREATS→HIV');
+    await assert.assertTrue(results.some(r => r.predicate === 'CAUSES' && r.object === 'aids'), 'Should include CAUSES→AIDS via HIV');
 
     await store.clear();
   });

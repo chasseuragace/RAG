@@ -529,8 +529,10 @@ async function setupTests() {
       tags:           [],
     });
 
-    // traceActions should be an array (even if empty on single-iteration runs)
+    // traceActions should contain the actual actions from the pipeline execution
     await a.assertTrue(Array.isArray(fixture.traceActions), 'traceActions is an array');
+    await a.assertTrue(fixture.traceActions.length > 0, 'traceActions contains actions from the run');
+    await a.assertTrue(fixture.traceActions.every(a => typeof a === 'string' && a.length > 0), 'every traceAction is a non-empty string');
     fs.unlinkSync(file);
   });
 
@@ -555,10 +557,13 @@ async function setupTests() {
     });
 
     await a.assertTrue(Array.isArray(fixture.retrievedChunks), 'retrievedChunks is an array');
+    await a.assertTrue(fixture.retrievedChunks.length > 0, 'captured at least one chunk');
     if (fixture.retrievedChunks.length > 0) {
       const chunk = fixture.retrievedChunks[0];
       await a.assertTrue('id' in chunk, 'chunk has id');
       await a.assertTrue('relevance' in chunk, 'chunk has relevance');
+      await a.assertTrue(typeof chunk.relevance === 'number', 'relevance is a number');
+      await a.assertTrue(chunk.relevance >= 0 && chunk.relevance <= 1, 'relevance is in [0,1]');
     }
     fs.unlinkSync(file);
   });
@@ -614,6 +619,8 @@ async function setupTests() {
     });
 
     await a.assertTrue(fixture.goal !== null && typeof fixture.goal === 'object', 'goal is an object');
+    await a.assertEqual(fixture.goal.objective, 'MAXIMIZE_RECALL', 'goal.objective matches pipeline config');
+    await a.assertEqual(fixture.goal.maxIterations, 2, 'goal.maxIterations matches pipeline config');
     fs.unlinkSync(file);
   });
 

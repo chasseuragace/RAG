@@ -49,7 +49,7 @@ async function setupTests() {
     const sim12 = cosine(v1, v2);
     const sim13 = cosine(v1, v3);
     await a.assertTrue(sim12 > sim13, `similar texts (${sim12.toFixed(3)}) score higher than unrelated (${sim13.toFixed(3)})`);
-    await a.assertTrue(sim12 > 0.05, 'shared-vocabulary similarity is above noise');
+    await a.assertTrue(sim12 > 0.1, 'shared-vocabulary similarity is above noise');
     const v1b = await embedder.embed('deep learning neural networks explained');
     await a.assertEqual(v1[0], v1b[0], 'same text produces identical embedding');
     await a.assertEqual(v1.length, 384, 'embedding dimension is 384');
@@ -256,8 +256,8 @@ async function setupTests() {
     });
     const result = await pipeline.run('deep learning', 2);
     await a.assertTrue(result.success, 'does not throw on empty corpus');
-    await a.assertTrue(result.trace.length > 0, 'records trace events');
-    await a.assertTrue(result.finalAction && result.finalAction.type === 'stop', 'stops on empty corpus');
+    await a.assertEqual(result.resultsCount, 0, 'returns zero results on empty corpus');
+    await a.assertEqual(result.finalAction.type, 'stop', 'stops on empty corpus');
   });
 
   runner.test('AgenticRetrievalPipeline is deterministic for identical inputs', async (a) => {
