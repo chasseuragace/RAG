@@ -24,12 +24,23 @@ const { CrossEncoderReranker } = require('./rerankers/real');
 const { NovitaInference } = require('./inference/novita');
 const { MockInference } = require('./inference/mock');
 const { LLMJudge } = require('./agentic/judge');
-const { LLMQueryRewriter, HeuristicQueryRewriter } = require('./agentic/query-rewriter');
+const { LLMQueryRewriter } = require('./agentic/query-rewriter');
 const { ConcreteInjectionPipeline } = require('./pipelines/injection');
-const { ConcreteRetrievalPipeline, HybridRetrievalPipeline } = require('./pipelines/retrieval');
+const { NEREnrichedRetrievalPipeline } = require('./pipelines/retrieval');
 const { AgenticRetrievalPipeline } = require('./pipelines/agentic-retrieval');
-const { HeuristicRetrievalStrategy } = require('./agentic/strategies/heuristic');
+const { GraphRAGPipeline } = require('./pipelines/graph-rag');
 const { RetrievalObjectives } = require('./core/interfaces');
+// NER / graph components
+const { MockEntityExtractor } = require('./ner/mock-extractor');
+const { MockAcronymGlossary } = require('./ner/mock-glossary');
+const { MockMetadataFilter } = require('./ner/mock-filter');
+const { MockGraphStore } = require('./graph/mock-store');
+const { MockRelationshipExtractor } = require('./graph/mock-extractor');
+const { MockContextFuser } = require('./graph/mock-fuser');
+// Authority components
+const { MockProvenanceAnnotator } = require('./authority/mock-annotator');
+const { StaticDictionaryScorer } = require('./authority/mock-scorer');
+const { AuthorityAwareReranker } = require('./rerankers/authority-aware');
 
 // public/ lives at the project root, one level above src/
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
@@ -50,63 +61,112 @@ class RAGServer {
     this.isReal = isReal;
     this.expertMode = EXPERT_MODE;
     this.injectionPipeline = null;
-    this.retrievalPipeline = null;
-    this.agenticPipeline = null;
-    this.inference = null;
-    this.store = null;
+    this.retrievalPipeline = null;  // NEREnrichedRetrievalPipeline
+    this.agenticPipeline   = null;  // AgenticRetrievalPipeline (agentic loop)
+    this.graphRagPipeline  = null;  // GraphRAGPipeline (dual-path, used by /ask)
+    this.inference  = null;
+    this.store      = null;
     this.hybridStore = null;
-    this.bm25Store = null;
-    this.reranker = null;
-    this.registry = null;
-    this.server = null;
-    this.wsServer = null;
-    this.clients = new Set();
+    this.bm25Store  = null;
+    this.reranker   = null;
+    this.graphStore = null;
+    this.registry   = null;
+    this.server     = null;
+    this.wsServer   = null;
+    this.clients    = new Set();
   }
 
   async initialize() {
     this.registry = new DocRegistry();
+
+    // ── Shared NER / graph / authority components (same interfaces for both modes) ──
+    const ner          = new MockEntityExtractor();
+    const glossary     = new MockAcronymGlossary();
+    const filter       = new MockMetadataFilter();
+    const relExtractor = new MockRelationshipExtractor();
+    const graphStore   = new MockGraphStore();
+    const fuser        = new MockContextFuser();
+    const annotator    = new MockProvenanceAnnotator();
+    const scorer       = new StaticDictionaryScorer();
+    this.graphStore    = graphStore;
+
     if (this.isReal) {
-      const embedder = new GeminiEmbedder();
-      const store = new ChromaVectorStore();
-      const bm25 = new BM25Store();
-      const hybrid = new HybridStore(store, bm25);
-      const loader = new RealDocumentLoader();
-      const reranker = new CrossEncoderReranker();
-       this.inference = new NovitaInference();
-       const judge = new LLMJudge(this.inference);
-       const queryRewriter = new LLMQueryRewriter(this.inference);
-       this.injectionPipeline = new ConcreteInjectionPipeline(loader, embedder, hybrid);
-       this.retrievalPipeline = new HybridRetrievalPipeline(embedder, hybrid);
-       this.agenticPipeline = new AgenticRetrievalPipeline(embedder, hybrid, reranker, {
-         objective: RetrievalObjectives.BALANCED,
-         latencyBudget: 5000,
-         maxIterations: 2,
-         minimumQuality: 0.5
-       }, null, judge, queryRewriter);
-      this.store = hybrid;
+      const embedder  = new GeminiEmbedder();
+      const store     = new ChromaVectorStore();
+      const bm25      = new BM25Store();
+      const hybrid    = new HybridStore(store, bm25);
+      const loader    = new RealDocumentLoader();
+      const baseReranker  = new CrossEncoderReranker();
+      const reranker  = new AuthorityAwareReranker(scorer, { semanticReranker: baseReranker });
+      this.inference  = new NovitaInference();
+      const judge     = new LLMJudge(this.inference);
+      const queryRewriter = new LLMQueryRewriter(this.inference);
+
+      // Injection: chunk → annotate authority → NER tag → rel extract → embed → store
+      this.injectionPipeline = new ConcreteInjectionPipeline(
+        loader, embedder, hybrid, ner, relExtractor, graphStore, annotator
+      );
+
+      // Retrieval: acronym expand → NER filter → hybrid search → authority-aware rerank
+      this.retrievalPipeline = new NEREnrichedRetrievalPipeline(
+        embedder, hybrid, { ner, glossary, filter, reranker }
+      );
+
+      // Agentic loop (multi-iteration quality control)
+      this.agenticPipeline = new AgenticRetrievalPipeline(
+        embedder, hybrid, reranker,
+        { objective: RetrievalObjectives.BALANCED, latencyBudget: 5000, maxIterations: 2, minimumQuality: 0.5 },
+        null, judge, queryRewriter
+      );
+
+      // Graph-RAG: dual-path parallel retrieval + context fusion + authority-aware rerank
+      this.graphRagPipeline = new GraphRAGPipeline(
+        embedder, hybrid, graphStore,
+        { ner, glossary, filter, fuser, reranker, graphDepth: 1, candidateK: 20 }
+      );
+
+      this.store      = hybrid;
       this.hybridStore = hybrid;
-      this.bm25Store = bm25;
-      this.reranker = reranker;
+      this.bm25Store  = bm25;
+      this.reranker   = reranker;
+
     } else {
-      const embedder = new MockEmbedder();
-      const store = new MockVectorStore();
-      const bm25 = new BM25Store();
-      const hybrid = new HybridStore(store, bm25);
-      const loader = new MockDocumentLoader();
-      const reranker = new MockReranker();
-      this.inference = new MockInference();
-      this.injectionPipeline = new ConcreteInjectionPipeline(loader, embedder, hybrid);
-      this.retrievalPipeline = new HybridRetrievalPipeline(embedder, hybrid);
-      this.agenticPipeline = new AgenticRetrievalPipeline(embedder, hybrid, reranker, {
-        objective: RetrievalObjectives.BALANCED,
-        latencyBudget: 5000,
-        maxIterations: 2,
-        minimumQuality: 0.5
-      });
-      this.store = hybrid;
+      const embedder  = new MockEmbedder();
+      const store     = new MockVectorStore();
+      const bm25      = new BM25Store();
+      const hybrid    = new HybridStore(store, bm25);
+      const loader    = new MockDocumentLoader();
+      const baseReranker  = new MockReranker();
+      const reranker  = new AuthorityAwareReranker(scorer, { semanticReranker: baseReranker });
+      this.inference  = new MockInference();
+
+      // Injection: chunk → annotate authority → NER tag → rel extract → embed → store
+      this.injectionPipeline = new ConcreteInjectionPipeline(
+        loader, embedder, hybrid, ner, relExtractor, graphStore, annotator
+      );
+
+      // Retrieval: acronym expand → NER filter → hybrid search → authority-aware rerank
+      this.retrievalPipeline = new NEREnrichedRetrievalPipeline(
+        embedder, hybrid, { ner, glossary, filter, reranker }
+      );
+
+      // Agentic loop
+      this.agenticPipeline = new AgenticRetrievalPipeline(
+        embedder, hybrid, reranker,
+        { objective: RetrievalObjectives.BALANCED, latencyBudget: 5000, maxIterations: 2, minimumQuality: 0.5 }
+      );
+
+      // Graph-RAG: dual-path parallel retrieval + context fusion + authority-aware rerank
+      this.graphRagPipeline = new GraphRAGPipeline(
+        embedder, hybrid, graphStore,
+        { ner, glossary, filter, fuser, reranker, graphDepth: 1, candidateK: 20 }
+      );
+
+      this.store      = hybrid;
       this.hybridStore = hybrid;
-      this.bm25Store = bm25;
-      this.reranker = reranker;
+      this.bm25Store  = bm25;
+      this.reranker   = reranker;
+
       await this.injectionPipeline.run('/mock', this.registry);
     }
   }
@@ -143,7 +203,8 @@ class RAGServer {
         break;
       case 'request:stats':
         const stats = await this.store.getStats();
-        ws.send(JSON.stringify({ type: 'stats', data: stats }));
+        const graphStats = await this.graphStore.getStats();
+        ws.send(JSON.stringify({ type: 'stats', data: { ...stats, graph: graphStats } }));
         break;
       case 'request:inject':
         // Full rebuild: clear + inject from INPUT_DIR. The pipeline rebuilds the
@@ -159,6 +220,7 @@ class RAGServer {
         break;
       case 'request:clear':  // legacy direct clear (still works)
         await this.store.clear();
+        await this.graphStore.clear();
         this._resetRegistry();
         ws.send(JSON.stringify({ type: 'clear:result', data: { success: true } }));
         break;
@@ -171,15 +233,35 @@ class RAGServer {
         const conv = ConversationStore.getOrCreate(sessionId);
         const history = conv.getHistory(10);
         const topK = payload.topK || 3;
-        const agenticResult = await this.agenticPipeline.run(payload.query, topK);
-        if (!agenticResult.success) throw new Error(agenticResult.error);
-        const contextDocs = agenticResult.results.map(r => ({ id: r.id, content: r.metadata.content || '', metadata: r.metadata }));
-        const answer = await this.inference.generateAnswer(payload.query, contextDocs, history);
+        // Use GraphRAGPipeline: dual-path (graph traversal + NER-filtered hybrid)
+        const graphRagResult = await this.graphRagPipeline.run(payload.query, topK);
+        if (!graphRagResult.success) throw new Error(graphRagResult.error);
+        // Build context docs from vector chunks for inference
+        const contextDocs = graphRagResult.vectorChunks.map(r => ({
+          id: r.id,
+          content: r.metadata?.content || '',
+          metadata: r.metadata
+        }));
+        // Pass the full fused context string (graph facts + text passages) to inference
+        const answer = await this.inference.generateAnswer(
+          payload.query, contextDocs, history,
+          { fusedContext: graphRagResult.combinedContext }
+        );
         conv.addMessage('user', payload.query);
         conv.addMessage('assistant', answer);
         ws.send(JSON.stringify({
           type: 'ask:result',
-          data: { success: true, query: payload.query, answer, sources: agenticResult.results, sessionId, assessment: agenticResult.assessment, decision: agenticResult.decision, finalAction: agenticResult.finalAction, trace: agenticResult.trace, goal: agenticResult.goal }
+          data: {
+            success: true,
+            query:          payload.query,
+            expandedQuery:  graphRagResult.expandedQuery,
+            entities:       graphRagResult.entities,
+            answer,
+            sources:        graphRagResult.vectorChunks,
+            graphFacts:     graphRagResult.context.graphFacts,
+            graphPaths:     graphRagResult.graphPaths,
+            sessionId,
+          }
         }));
         break;
       case 'ping':
@@ -255,7 +337,9 @@ class RAGServer {
       res.end(JSON.stringify(serverEvents.getMetrics(), null, 2));
     }
     else if (url === '/stats' && req.method === 'GET') {
-      this.store.getStats().then(stats => res.end(JSON.stringify(stats, null, 2))).catch(e => { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); });
+      Promise.all([this.store.getStats(), this.graphStore.getStats()])
+        .then(([storeStats, graphStats]) => res.end(JSON.stringify({ ...storeStats, graph: graphStats }, null, 2)))
+        .catch(e => { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); });
     }
     else if (url === '/events' && req.method === 'GET') {
       res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' });
@@ -287,7 +371,9 @@ class RAGServer {
       });
     }
     else if (url === '/clear' && req.method === 'POST') {
-      this.store.clear().then(() => { this._resetRegistry(); res.end(JSON.stringify({ success: true })); }).catch(e => { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); });
+      Promise.all([this.store.clear(), this.graphStore.clear()])
+        .then(() => { this._resetRegistry(); res.end(JSON.stringify({ success: true })); })
+        .catch(e => { res.writeHead(500); res.end(JSON.stringify({ error: e.message })); });
     }
     else if (url === '/retrieve' && req.method === 'POST') {
       let body = '';
@@ -307,17 +393,37 @@ class RAGServer {
       req.on('end', async () => {
         try {
           const { query, sessionId, topK = 3 } = JSON.parse(body);
-          const sid = sessionId || `http_${Date.now()}_${Math.random().toString(36).substr(2, 8)}`;
+          const sid  = sessionId || `http_${Date.now()}_${Math.random().toString(36).substr(2, 8)}`;
           const conv = ConversationStore.getOrCreate(sid);
           const history = conv.getHistory(10);
-          const agenticResult = await this.agenticPipeline.run(query, topK);
-          if (!agenticResult.success) throw new Error(agenticResult.error);
-          const contextDocs = agenticResult.results.map(r => ({ id: r.id, content: r.metadata.content || '', metadata: r.metadata }));
-          const answer = await this.inference.generateAnswer(query, contextDocs, history);
+
+          // Dual-path: graph traversal + NER-filtered hybrid retrieval
+          const graphRagResult = await this.graphRagPipeline.run(query, topK);
+          if (!graphRagResult.success) throw new Error(graphRagResult.error);
+
+          const contextDocs = graphRagResult.vectorChunks.map(r => ({
+            id: r.id,
+            content: r.metadata?.content || '',
+            metadata: r.metadata
+          }));
+          const answer = await this.inference.generateAnswer(
+            query, contextDocs, history,
+            { fusedContext: graphRagResult.combinedContext }
+          );
           conv.addMessage('user', query);
           conv.addMessage('assistant', answer);
+
           res.writeHead(200);
-          res.end(JSON.stringify({ success: true, query, answer, sources: agenticResult.results, sessionId: sid, assessment: agenticResult.assessment, decision: agenticResult.decision, finalAction: agenticResult.finalAction, trace: agenticResult.trace, goal: agenticResult.goal }, null, 2));
+          res.end(JSON.stringify({
+            success: true,
+            query,
+            expandedQuery: graphRagResult.expandedQuery,
+            entities:      graphRagResult.entities,
+            answer,
+            sources:       graphRagResult.vectorChunks,
+            graphFacts:    graphRagResult.context.graphFacts,
+            sessionId:     sid,
+          }, null, 2));
         } catch(e) { res.writeHead(400); res.end(JSON.stringify({ error: e.message })); }
       });
     }

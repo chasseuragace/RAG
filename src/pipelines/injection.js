@@ -4,7 +4,27 @@ const { hashContent } = require('../core/registry');
 const { CHUNK_SIZE, CHUNK_OVERLAP } = require('../config');
 const { serverEvents } = require('../events');
 
+// NER enrichment is opt-in: pass an EntityExtractor instance to the pipeline
+// constructor. When absent the pipeline behaves identically to before.
+
 class ConcreteInjectionPipeline extends InjectionPipeline {
+  /**
+   * @param {DocumentLoader}        loader
+   * @param {Embedder}              embedder
+   * @param {VectorStore}           store
+   * @param {EntityExtractor}       [ner]          — tags chunk metadata with entities
+   * @param {RelationshipExtractor} [relExtractor] — extracts triples for the graph store
+   * @param {GraphStore}            [graphStore]   — receives extracted triples
+   * @param {ProvenanceAnnotator}   [annotator]    — attaches authority_signal to chunk metadata
+   */
+  constructor(loader, embedder, store, ner = null, relExtractor = null, graphStore = null, annotator = null) {
+    super(loader, embedder, store);
+    this.ner          = ner;
+    this.relExtractor = relExtractor;
+    this.graphStore   = graphStore;
+    this.annotator    = annotator;
+  }
+
   // Full rebuild: clear the store, then chunk/embed/store every document.
   // Kept as an escape hatch; prefer runIncremental() for routine syncs.
   // When a `registry` is passed it is rebuilt to mirror exactly what was just
@@ -28,27 +48,41 @@ class ConcreteInjectionPipeline extends InjectionPipeline {
       const registryRecords = {};
       for (const doc of docs) {
         const textChunks = chunkText(doc.content, CHUNK_SIZE, CHUNK_OVERLAP);
+        // Authority annotation: compute once per doc, stamp on every chunk.
+        const authoritySignal = this.annotator ? this.annotator.annotate(doc.metadata) : null;
         for (let i = 0; i < textChunks.length; i++) {
-          chunks.push({
-            id: `${doc.id}_chunk_${i}`,
-            content: textChunks[i],
-            metadata: {
-              ...doc.metadata,
-              chunk_index: i,
-              total_chunks: textChunks.length,
-              original_id: doc.id
-            }
-          });
+          const chunkMeta = {
+            ...doc.metadata,
+            chunk_index:  i,
+            total_chunks: textChunks.length,
+            original_id:  doc.id,
+          };
+          if (authoritySignal) chunkMeta.authority_signal = authoritySignal;
+          chunks.push({ id: `${doc.id}_chunk_${i}`, content: textChunks[i], metadata: chunkMeta });
         }
         registryRecords[doc.id] = {
-          hash: hashContent(doc.content),
-          size: doc.metadata.size,
-          mtime: doc.metadata.mtime,
-          chunkCount: textChunks.length,
+          hash:          hashContent(doc.content),
+          size:          doc.metadata.size,
+          mtime:         doc.metadata.mtime,
+          chunkCount:    textChunks.length,
           lastIndexedAt: Date.now()
         };
       }
       serverEvents.logEvent('injection:chunks-created', { totalChunks: chunks.length });
+
+      // 3b. NER tagging — run entity extraction on each chunk and attach to metadata.
+      //     Skipped when no extractor is configured (graceful degradation).
+      if (this.ner) {
+        await this._tagChunksWithEntities(chunks);
+        serverEvents.logEvent('injection:ner-tagged', { totalChunks: chunks.length });
+      }
+
+      // 3c. Relationship extraction → graph store triples.
+      //     Skipped when either relExtractor or graphStore is absent.
+      if (this.relExtractor && this.graphStore) {
+        const tripleCount = await this._extractAndStoreTriples(chunks);
+        serverEvents.logEvent('injection:graph-triples', { tripleCount });
+      }
 
       // 4. Embed all chunks
       const texts = chunks.map(c => c.content);
@@ -77,16 +111,74 @@ class ConcreteInjectionPipeline extends InjectionPipeline {
   // deleting any previous chunks of this doc first (see runIncremental).
   async _indexDoc(doc) {
     const textChunks = chunkText(doc.content, CHUNK_SIZE, CHUNK_OVERLAP);
-    const chunks = textChunks.map((content, i) => ({
-      id: `${doc.id}_chunk_${i}`,
-      content,
-      metadata: { ...doc.metadata, chunk_index: i, total_chunks: textChunks.length, original_id: doc.id }
-    }));
+    const authoritySignal = this.annotator ? this.annotator.annotate(doc.metadata) : null;
+    const chunks = textChunks.map((content, i) => {
+      const meta = { ...doc.metadata, chunk_index: i, total_chunks: textChunks.length, original_id: doc.id };
+      if (authoritySignal) meta.authority_signal = authoritySignal;
+      return { id: `${doc.id}_chunk_${i}`, content, metadata: meta };
+    });
+
+    // NER tagging (opt-in)
+    if (this.ner) {
+      await this._tagChunksWithEntities(chunks);
+    }
+
+    // Relationship extraction → graph store (opt-in)
+    if (this.relExtractor && this.graphStore) {
+      await this._extractAndStoreTriples(chunks);
+    }
+
     const embeddings = await this.embedder.embedBatch(chunks.map(c => c.content));
     for (let i = 0; i < chunks.length; i++) {
       await this.store.store(chunks[i].id, embeddings[i], { ...chunks[i].metadata, content: chunks[i].content });
     }
     return chunks.length;
+  }
+
+  /**
+   * In-place: runs NER on each chunk's content and adds an `entities` field
+   * to its metadata.
+   *
+   * chunk.metadata.entities = { DRUG: ['azt'], DISEASE: ['hiv'], ... }
+   *
+   * @param {{ id: string, content: string, metadata: object }[]} chunks
+   */
+  async _tagChunksWithEntities(chunks) {
+    await Promise.all(chunks.map(async (chunk) => {
+      try {
+        const entities = await this.ner.extract(chunk.content);
+        chunk.metadata.entities = entities;
+      } catch (err) {
+        // Soft failure: NER error should not block ingestion.
+        serverEvents.logEvent('injection:ner-error', { chunkId: chunk.id, error: err.message });
+        chunk.metadata.entities = {};
+      }
+    }));
+  }
+
+  /**
+   * Runs relationship extraction on each chunk and stores resulting triples
+   * in the graph store.  Returns the total number of triples stored.
+   *
+   * Soft failure per chunk: one bad chunk never blocks the rest.
+   *
+   * @param {{ id: string, content: string, metadata: object }[]} chunks
+   * @returns {Promise<number>}
+   */
+  async _extractAndStoreTriples(chunks) {
+    let total = 0;
+    await Promise.all(chunks.map(async (chunk) => {
+      try {
+        const triples = await this.relExtractor.extract(chunk.content, chunk.id);
+        if (triples.length > 0) {
+          await this.graphStore.storeTriples(triples);
+          total += triples.length;
+        }
+      } catch (err) {
+        serverEvents.logEvent('injection:graph-error', { chunkId: chunk.id, error: err.message });
+      }
+    }));
+    return total;
   }
 
   // Differential sync: only re-embed added/changed docs, delete removed docs.
