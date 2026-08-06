@@ -6,7 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const http = require('http');
 
-const { INPUT_DIR, CHUNK_SIZE, CHUNK_OVERLAP, CONVERSATIONS_DIR, EXPERT_MODE, NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD, PG_CONNECTION_STRING } = require('../shared/config');
+const { INPUT_DIR, CHUNK_SIZE, CHUNK_OVERLAP, CONVERSATIONS_DIR, EXPERT_MODE, NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD, PG_CONNECTION_STRING, MODEL_CONTEXT_WINDOW, SYSTEM_TOKEN_BUDGET, RESPONSE_MAX_TOKENS, MIN_MESSAGES_TO_KEEP, SUMMARY_MAX_TOKENS, BASE_SYSTEM_PROMPT, USE_NEW_CONTEXT } = require('../shared/config');
 const { serverEvents } = require('../shared/events');
 const { ConversationStore } = require('../session/conversation');
 const { DocRegistry } = require('../ingestion/registry');
@@ -41,6 +41,11 @@ const { MockProvenanceAnnotator } = require('../ingestion/authority/mock-annotat
 const { StaticDictionaryScorer } = require('../retrieval/authority/mock-scorer');
 const { AuthorityAwareReranker } = require('../retrieval/rerankers/authority-aware');
 const { UnifiedRetrievalPipeline } = require('../retrieval/unified-pipeline');
+const { createThreadManager } = require('../session/thread-manager-factory');
+const { TokenCounter } = require('../shared/token-counter');
+const { MessageSummarizer } = require('../shared/message-summarizer');
+const { ContextWindowManager } = require('../shared/context-window-manager');
+const { Message } = require('../shared/interfaces');
 
 // public/ lives at the project root, one level above src/
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
@@ -75,6 +80,8 @@ class RAGServer {
     this.server     = null;
     this.wsServer   = null;
     this.clients    = new Set();
+    this.threadManager = null;
+    this.contextWindowManager = null;
   }
 
   async initialize() {
@@ -199,11 +206,28 @@ class RAGServer {
       this.bm25Store  = bm25;
       this.reranker   = reranker;
 
-      await this.injectionPipeline.run('/mock', this.registry);
-      // @gotcha Mock mode blocks here until the full mock injection completes.
-      //       Real mode returns immediately — the heavy lifting happens on /inject requests.
-    }
-  }
+await this.injectionPipeline.run('/mock', this.registry);
+       // @gotcha Mock mode blocks here until the full mock injection completes.
+       //       Real mode returns immediately — the heavy lifting happens on /inject requests.
+     }
+
+     // ── Context-aware chat (feature-flagged) ──
+     if (USE_NEW_CONTEXT) {
+       this.threadManager = createThreadManager();
+       const tokenCounter = new TokenCounter();
+       await tokenCounter.init();
+       const summarizer = new MessageSummarizer(this.inference);
+       this.contextWindowManager = new ContextWindowManager({
+         tokenCounter,
+         summarizer,
+         threadManager: this.threadManager,
+         modelContextWindow: MODEL_CONTEXT_WINDOW,
+         systemTokenBudget: SYSTEM_TOKEN_BUDGET,
+         responseTokenBudget: RESPONSE_MAX_TOKENS,
+         minMessagesToKeep: MIN_MESSAGES_TO_KEEP,
+       });
+     }
+   }
 
   setupWebSocket() {
     if (!WebSocketServer) return;
@@ -262,11 +286,9 @@ class RAGServer {
         const retrieval = await this.retrievalPipeline.run(payload.query, payload.topK || 5);
         ws.send(JSON.stringify({ type: 'retrieve:result', data: retrieval }));
         break;
-      case 'request:ask':
+      case 'request:ask': {
         const sessionId = payload.sessionId || `anon_${Date.now()}_${Math.random().toString(36).substr(2, 8)}`;
         // @gotcha `String.prototype.substr` is deprecated. Use `substring(2, 10)` instead.
-        const conv = ConversationStore.getOrCreate(sessionId);
-        const history = conv.getHistory(10);
         const topK = payload.topK || 3;
         // Use GraphRAGPipeline: dual-path (graph traversal + NER-filtered hybrid)
         const graphRagResult = await this.graphRagPipeline.run(payload.query, topK);
@@ -277,13 +299,35 @@ class RAGServer {
           content: r.metadata?.content || '',
           metadata: r.metadata
         }));
-        // Pass the full fused context string (graph facts + text passages) to inference
-        const answer = await this.inference.generateAnswer(
-          payload.query, contextDocs, history,
-          { fusedContext: graphRagResult.combinedContext }
-        );
-        conv.addMessage('user', payload.query);
-        conv.addMessage('assistant', answer);
+
+        let answer;
+        if (this.threadManager && this.contextWindowManager) {
+          // ── New context-aware path ──
+          const thread = await this.threadManager.getOrCreate(sessionId);
+          const userMsg = Message.create('user', payload.query);
+          await this.threadManager.addMessage(sessionId, userMsg);
+          const updatedThread = await this.threadManager.getThread(sessionId);
+          const contextPayload = await this.contextWindowManager.buildContext(
+            updatedThread,
+            BASE_SYSTEM_PROMPT,
+            contextDocs,
+            RESPONSE_MAX_TOKENS
+          );
+          answer = await this.inference.generateChat(contextPayload.messages);
+          const assistantMsg = Message.create('assistant', answer);
+          await this.threadManager.addMessage(sessionId, assistantMsg);
+        } else {
+          // ── Legacy naive path ──
+          const conv = ConversationStore.getOrCreate(sessionId);
+          const history = conv.getHistory(10);
+          answer = await this.inference.generateAnswer(
+            payload.query, contextDocs, history,
+            { fusedContext: graphRagResult.combinedContext }
+          );
+          conv.addMessage('user', payload.query);
+          conv.addMessage('assistant', answer);
+        }
+
         ws.send(JSON.stringify({
           type: 'ask:result',
           data: {
@@ -299,6 +343,7 @@ class RAGServer {
           }
         }));
         break;
+      }
       case 'ping':
         ws.send(JSON.stringify({ type: 'pong', timestamp: Date.now() }));
         break;
@@ -429,12 +474,9 @@ class RAGServer {
         try {
           const { query, sessionId, topK = 3 } = JSON.parse(body);
           const sid  = sessionId || `http_${Date.now()}_${Math.random().toString(36).substr(2, 8)}`;
-          // @gotcha `String.prototype.substr` is deprecated. Use `substring(2, 10)` instead.
-          const conv = ConversationStore.getOrCreate(sid);
-          const history = conv.getHistory(10);
-
+          const topKVal = topK;
           // Dual-path: graph traversal + NER-filtered hybrid retrieval
-          const graphRagResult = await this.graphRagPipeline.run(query, topK);
+          const graphRagResult = await this.graphRagPipeline.run(query, topKVal);
           if (!graphRagResult.success) throw new Error(graphRagResult.error);
 
           const contextDocs = graphRagResult.vectorChunks.map(r => ({
@@ -442,12 +484,34 @@ class RAGServer {
             content: r.metadata?.content || '',
             metadata: r.metadata
           }));
-          const answer = await this.inference.generateAnswer(
-            query, contextDocs, history,
-            { fusedContext: graphRagResult.combinedContext }
-          );
-          conv.addMessage('user', query);
-          conv.addMessage('assistant', answer);
+
+          let answer;
+          if (this.threadManager && this.contextWindowManager) {
+            // ── New context-aware path ──
+            const thread = await this.threadManager.getOrCreate(sid);
+            const userMsg = Message.create('user', query);
+            await this.threadManager.addMessage(sid, userMsg);
+            const updatedThread = await this.threadManager.getThread(sid);
+            const contextPayload = await this.contextWindowManager.buildContext(
+              updatedThread,
+              BASE_SYSTEM_PROMPT,
+              contextDocs,
+              RESPONSE_MAX_TOKENS
+            );
+            answer = await this.inference.generateChat(contextPayload.messages);
+            const assistantMsg = Message.create('assistant', answer);
+            await this.threadManager.addMessage(sid, assistantMsg);
+          } else {
+            // ── Legacy naive path ──
+            const conv = ConversationStore.getOrCreate(sid);
+            const history = conv.getHistory(10);
+            answer = await this.inference.generateAnswer(
+              query, contextDocs, history,
+              { fusedContext: graphRagResult.combinedContext }
+            );
+            conv.addMessage('user', query);
+            conv.addMessage('assistant', answer);
+          }
 
           res.writeHead(200);
           res.end(JSON.stringify({

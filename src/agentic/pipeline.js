@@ -8,7 +8,7 @@ const { RetrievalExecutor } = require('./executor');
 const { serverEvents } = require('../shared/events');
 
 class AgenticRetrievalPipeline extends RetrievalPipeline {
-  constructor(embedder, hybridStore, reranker, goal, policy, judge, queryRewriter, unifiedPipeline = null) {
+  constructor(embedder, hybridStore, reranker, goal, policy, judge, queryRewriter, unifiedPipeline = null, threadManager = null, contextWindowManager = null) {
     super(embedder, hybridStore);
     this.embedder = embedder;
     this.hybridStore = hybridStore;
@@ -19,14 +19,16 @@ class AgenticRetrievalPipeline extends RetrievalPipeline {
       maxIterations: 2,
       minimumQuality: 0.5
     };
-    this.strategy = { run: this._createStrategy(embedder, hybridStore, reranker, policy, judge, queryRewriter, unifiedPipeline) };
+    this.threadManager = threadManager;
+    this.contextWindowManager = contextWindowManager;
+    this.strategy = { run: this._createStrategy(embedder, hybridStore, reranker, policy, judge, queryRewriter, unifiedPipeline, threadManager, contextWindowManager) };
   }
 
-  _createStrategy(embedder, hybridStore, reranker, policy, judge, queryRewriter, unifiedPipeline) {
+  _createStrategy(embedder, hybridStore, reranker, policy, judge, queryRewriter, unifiedPipeline, threadManager, contextWindowManager) {
     const judgeInstance = judge || new RetrievalJudge();
     const policyInstance = policy || new HeuristicRetrievalPolicy();
     const executor = new RetrievalExecutor(embedder, hybridStore, reranker, queryRewriter, unifiedPipeline);
-    const coordinator = new Coordinator(judgeInstance, policyInstance, executor);
+    const coordinator = new Coordinator(judgeInstance, policyInstance, executor, threadManager, contextWindowManager);
     return async (observation, maxIterations) => coordinator.run(observation, { ...this.goal, maxIterations });
   }
 

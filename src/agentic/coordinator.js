@@ -3,10 +3,26 @@ const { Decision } = require('./decision');
 const { Trace, TraceEvent } = require('./trace');
 
 class Coordinator {
-  constructor(judge, policy, executor) {
+  constructor(judge, policy, executor, threadManager = null, contextWindowManager = null) {
     this.judge = judge;
     this.policy = policy;
     this.executor = executor;
+    this.threadManager = threadManager;
+    this.contextWindowManager = contextWindowManager;
+  }
+
+  async _buildContext(obs) {
+    if (!this.threadManager || !this.contextWindowManager || !obs.thread) {
+      return obs;
+    }
+    const thread = await this.threadManager.getThread(obs.thread.id);
+    const contextPayload = await this.contextWindowManager.buildContext(
+      thread,
+      '',
+      [],
+      1000
+    );
+    return obs.withContextPayload(contextPayload).withThread(thread);
   }
 
   async run(observation, goal) {
@@ -22,6 +38,8 @@ class Coordinator {
         const elapsed = Date.now() - start;
         remaining = Math.max(0, goal.latencyBudget - elapsed);
       }
+
+      obs = await this._buildContext(obs);
 
       const assessment = await this.judge.evaluate(obs);
       trace.add(new TraceEvent({
@@ -90,9 +108,6 @@ class Coordinator {
       }
     }
 
-    // Do a final judge+policy pass on the updated observation instead of
-    // blindly returning 'stop'. This handles the common case where the last
-    // iteration performed a retrieval action and the results are now sufficient.
     const finalAssessment = await this.judge.evaluate(obs);
     const finalDecision = await this.policy.resolve(finalAssessment, { ...goal, finalPass: true }, trace);
     const resolvedAction = (finalDecision.action === 'answer') ? 'answer' : 'stop';

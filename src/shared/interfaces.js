@@ -140,10 +140,47 @@ class MetadataFilter {
 
 const RetrievalObjectives = { BALANCED: 'BALANCED', MAXIMIZE_RECALL: 'MAXIMIZE_RECALL', MINIMIZE_LATENCY: 'MINIMIZE_LATENCY', MAXIMIZE_PRECISION: 'MAXIMIZE_PRECISION' };
 
+// ========== THREAD ABSTRACTION ==========
+
+class Thread {
+  constructor(id, metadata = {}) {
+    this.id = id;
+    this.metadata = metadata;
+    this.messages = [];
+    this.summary = null;
+    this.lastSummarizedIndex = 0;
+  }
+  static create(id, metadata = {}) {
+    return new Thread(id, metadata);
+  }
+}
+
+class Message {
+  constructor(role, content, metadata = {}) {
+    this.id = crypto.randomUUID();
+    this.role = role;
+    this.content = content;
+    this.timestamp = Date.now();
+    this.metadata = metadata;
+  }
+  static create(role, content, metadata = {}) {
+    return new Message(role, content, metadata);
+  }
+}
+
+class ThreadManager {
+  async getOrCreate(threadId) { throw new Error('not implemented'); }
+  async addMessage(threadId, message) { throw new Error('not implemented'); }
+  async getThread(threadId) { throw new Error('not implemented'); }
+  async updateSummary(threadId, summary, lastSummarizedIndex) { throw new Error('not implemented'); }
+  async listThreads(filters) { throw new Error('not implemented'); }
+}
+
 module.exports = {
   DocumentLoader, Embedder, VectorStore, InjectionPipeline, RetrievalPipeline,
   Reranker, KeywordStore, Coordinator, RetrievalPolicy, RetrievalObjectives,
   EntityExtractor, AcronymGlossary, MetadataFilter,
   GraphStore, RelationshipExtractor, ContextFuser,
   AuthorityScorer, ProvenanceAnnotator,
+  Thread, Message, ThreadManager,
 };

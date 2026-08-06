@@ -28,6 +28,21 @@ class NovitaInference {
     serverEvents.logEvent('inference:complete', { queryLength: query.length, contextDocs: contextDocuments.length, duration: Date.now()-start });
     return answer;
   }
+  async generateChat(messages, options = {}) {
+    const start = Date.now();
+    const maxTokens = options.max_tokens || 1000;
+    const temperature = options.temperature || 0.1;
+    const res = await fetch('https://api.novita.ai/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.apiKey}` },
+      body: JSON.stringify({ model: this.model, messages, temperature, max_tokens: maxTokens })
+    });
+    if (!res.ok) throw new Error(`Novita error: ${res.status}`);
+    const data = await res.json();
+    const answer = data.choices[0].message.content;
+    serverEvents.logEvent('inference:complete', { duration: Date.now()-start });
+    return answer;
+  }
 }
 
 module.exports = { NovitaInference };

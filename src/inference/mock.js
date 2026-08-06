@@ -17,6 +17,16 @@ class MockInference {
     serverEvents.logEvent('inference:complete', { queryLength: query.length, contextDocs: contextDocuments.length, duration: Date.now() - start });
     return `[Mock] ${mockAnswer}`;
   }
+
+  async generateChat(messages, options = {}) {
+    const start = Date.now();
+    const lastUser = [...messages].reverse().find(m => m.role === 'user');
+    const mockAnswer = lastUser
+      ? `Based on the retrieved documents: ${lastUser.content.slice(0, 100)}.`
+      : 'I could not find any relevant context.';
+    serverEvents.logEvent('inference:complete', { duration: Date.now() - start });
+    return `[Mock] ${mockAnswer}`;
+  }
 }
 
 module.exports = { MockInference };
