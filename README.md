@@ -26,82 +26,288 @@ The system features a **Planner–Executor–Judge agentic retrieval loop** with
 
 ## 🏗️ Architecture
 
-### Top‑Level Flow
+### End‑to‑End Data Flow
 
 ```
-Client (HTTP/WS)
+📄 Document (.md)
     │
     ▼
 ┌─────────────────────────────────────────────────────────┐
-│  RAGServer (rag-server.js)                              │
-│  ├── HTTP server (REST API)                            │
-│  ├── WebSocket server (real‑time telemetry)            │
-│  └── SSE endpoint (/events)                            │
+│  1. INJECTION PIPELINE (ConcreteInjectionPipeline)      │
+│  ┌───────────────────────────────────────────────────┐ │
+│  │ Load → Chunk → NER Tag → Rel Extract → Annotate │ │
+│  │        → Embed → Store → Register                │ │
+│  └───────────────────────────────────────────────────┘ │
+│                                                         │
+│  ┌───────────────────────────────────────────────────┐ │
+│  │ 2. RETRIEVAL PIPELINE (NEREnrichedRetrievalPipeline)│ │
+│  │  Acronym Expand → NER Extract → Filter → Hybrid  │ │
+│  │  Search → Rerank → Return top‑K results          │ │
+│  └───────────────────────────────────────────────────┘ │
+│                                                         │
+│  ┌───────────────────────────────────────────────────┐ │
+│  │ 3. GRAPH RAG PIPELINE (GraphRAGPipeline)          │ │
+│  │  Entity Extraction → Graph Traversal → Context   │ │
+│  │  Fusion → Authority‑Aware Rerank → Return        │ │
+│  └───────────────────────────────────────────────────┘ │
+│                                                         │
+│  ┌───────────────────────────────────────────────────┐ │
+│  │ 4. UNIFIED PIPELINE (UnifiedRetrievalPipeline)    │ │
+│  │  Combines: Graph facts + Hybrid search + NER      │ │
+│  │  → Context fusion → Rerank → Single result set   │ │
+│  └───────────────────────────────────────────────────┘ │
+│                                                         │
+│  ┌───────────────────────────────────────────────────┐ │
+│  │ 5. AGENTIC LOOP (AgenticRetrievalPipeline)        │ │
+│  │  Coordinator: _buildContext → Judge → Policy      │ │
+│  │  → Executor → Loop (bounded by maxIterations)     │ │
+│  │  → Answer or Stop                                 │ │
+│  └───────────────────────────────────────────────────┘ │
+│                                                         │
+│  ┌───────────────────────────────────────────────────┐ │
+│  │ 6. INFERENCE (NovitaInference / MockInference)    │ │
+│  │  generateChat(contextMessages) → Answer           │ │
+│  └───────────────────────────────────────────────────┘ │
+│                                                         │
+│  ┌───────────────────────────────────────────────────┐ │
+│  │ 7. THREAD & CONTEXT MANAGEMENT                     │ │
+│  │  PostgresThreadManager → ContextWindowManager     │ │
+│  │  → Token‑aware message fitting + summarization    │ │
+│  └───────────────────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────┘
-    │
-    ├──► /inject            → ConcreteInjectionPipeline
-    ├──► /inject-incremental → ConcreteInjectionPipeline (differential)
-    ├──► /retrieve           → NEREnrichedRetrievalPipeline
-    ├──► /ask                → AgenticRetrievalPipeline → Coordinator
-    └──► /capture-fixture    → GoldenDataset + ReplayHarness
 ```
 
-### Agentic Retrieval Pipeline (the core loop)
+### 1. Injection Pipeline — Document Processing
 
-The `/ask` endpoint and WebSocket `request:ask` use a **Planner–Executor–Judge** architecture:
+The injection pipeline transforms raw Markdown documents into searchable, embedded chunks:
+
+```
+📄 input/*.md
+    │
+    ▼
+┌─────────────────────────────────────────────────────────┐
+│  Load (DocumentLoader)                                  │
+│  Read .md files, extract raw text                       │
+└────────────────────────┬────────────────────────────────┘
+                         ▼
+┌─────────────────────────────────────────────────────────┐
+│  Chunk (chunkText)                                      │
+│  Paragraph/sentence‑aware splitting                     │
+│  CHUNK_SIZE (1000) + CHUNK_OVERLAP (200)                │
+│  → Stable chunk IDs: {docId}_chunk_{index}             │
+└────────────────────────┬────────────────────────────────┘
+                         ▼
+┌─────────────────────────────────────────────────────────┐
+│  NER Tag (EntityExtractor)                              │
+│  Extract entities: DRUG, DISEASE, BIOMARKER, ...       │
+│  Tags each chunk's metadata with entity sets           │
+└────────────────────────┬────────────────────────────────┘
+                         ▼
+┌─────────────────────────────────────────────────────────┐
+│  Rel Extract (RelationshipExtractor)                    │
+│  Extract (subject, relation, object) triples           │
+│  → Graph edges stored in Neo4j                         │
+└────────────────────────┬────────────────────────────────┘
+                         ▼
+┌─────────────────────────────────────────────────────────┐
+│  Annotate (ProvenanceAnnotator)                         │
+│  Attach authority_signal to chunk metadata             │
+│  → Marks which source is authoritative for each fact   │
+└────────────────────────┬────────────────────────────────┘
+                         ▼
+┌─────────────────────────────────────────────────────────┐
+│  Embed (Embedder)                                       │
+│  Real: GeminiEmbedding API → 384‑dim vectors           │
+│  Mock: Deterministic content‑correlated vectors        │
+└────────────────────────┬────────────────────────────────┘
+                         ▼
+┌─────────────────────────────────────────────────────────┐
+│  Store (VectorStore + GraphStore)                       │
+│  Vector: Chroma (persistent) or Mock (in‑memory)       │
+│  Graph: Neo4j (persistent) or Mock (in‑memory)         │
+│  BM25: Inline keyword index (always in‑memory)         │
+│  HybridStore: Vector + BM25 + RRF fusion               │
+└────────────────────────┬────────────────────────────────┘
+                         ▼
+┌─────────────────────────────────────────────────────────┐
+│  Register (DocRegistry)                                 │
+│  doc‑registry.json = source of truth for incremental   │
+│  sync: { docId → {hash, size, mtime, chunkCount} }     │
+└─────────────────────────────────────────────────────────┘
+```
+
+### 2. Retrieval Pipeline — NER‑Enriched Hybrid Search
+
+The retrieval pipeline uses NER and acronym expansion to improve search recall:
+
+```
+Query: "What are the side effects of metformin?"
+    │
+    ▼
+┌─────────────────────────────────────────────────────────┐
+│  Step 1: Acronym Expansion (AcronymGlossary)           │
+│  "metformin" → "metformin" (no expansion needed)       │
+│  "HIV" → "Human Immunodeficiency Virus"                │
+└────────────────────────┬────────────────────────────────┘
+                         ▼
+┌─────────────────────────────────────────────────────────┐
+│  Step 2: NER Extraction (EntityExtractor)               │
+│  Extract entities from expanded query                   │
+│  → { DRUG: ["metformin"] }                              │
+└────────────────────────┬────────────────────────────────┘
+                         ▼
+┌─────────────────────────────────────────────────────────┐
+│  Step 3: Metadata Filter (MetadataFilter)               │
+│  Build filter from entities: { DISEASE: Set(), ... }   │
+│  → Post‑filter hybrid search results by entity match   │
+└────────────────────────┬────────────────────────────────┘
+                         ▼
+┌─────────────────────────────────────────────────────────┐
+│  Step 4: Hybrid Search (HybridStore)                    │
+│  Dense: embed(query) → vector similarity search        │
+│  Sparse: BM25 keyword search                           │
+│  Fusion: Reciprocal Rank Fusion (RRF)                  │
+│  → candidateK = topK × 4 (larger pool for filtering)  │
+└────────────────────────┬────────────────────────────────┘
+                         ▼
+┌─────────────────────────────────────────────────────────┐
+│  Step 5: Post‑Filter (MetadataFilter)                   │
+│  Apply entity filter to candidate pool                  │
+│  → If filter too aggressive, fall back to unfiltered   │
+└────────────────────────┬────────────────────────────────┘
+                         ▼
+┌─────────────────────────────────────────────────────────┐
+│  Step 6: Rerank (Reranker)                              │
+│  AuthorityAwareReranker:                                │
+│    semanticScore (cross‑encoder) + authorityScore       │
+│    → Final sorted results with rerankReason             │
+└────────────────────────┬────────────────────────────────┘
+                         ▼
+┌─────────────────────────────────────────────────────────┐
+│  Return: { success, resultsCount, results: [...] }     │
+│  Each result: { id, relevance, score, metadata }       │
+└─────────────────────────────────────────────────────────┘
+```
+
+### 3. Graph RAG Pipeline — Knowledge Graph Traversal
+
+The Graph RAG pipeline traverses the knowledge graph to find related facts:
+
+```
+Query: "What are the side effects of metformin?"
+    │
+    ▼
+┌─────────────────────────────────────────────────────────┐
+│  Step 1: Entity Extraction                             │
+│  Extract entities from query (DRUG: metformin)         │
+└────────────────────────┬────────────────────────────────┘
+                         ▼
+┌─────────────────────────────────────────────────────────┐
+│  Step 2: Graph Traversal (Neo4j)                        │
+│  apoc.path.expand from entity nodes                    │
+│  graphDepth controls neighbor traversal depth           │
+│  → Collect graph paths + confidence scores             │
+└────────────────────────┬────────────────────────────────┘
+                         ▼
+┌─────────────────────────────────────────────────────────┐
+│  Step 3: Context Fusion (ContextFuser)                  │
+│  Merge graph facts with vector search results          │
+│  → Confidence‑tagged fact strings                      │
+│  → Low‑confidence triples filtered by minConfidence    │
+└────────────────────────┬────────────────────────────────┘
+                         ▼
+┌─────────────────────────────────────────────────────────┐
+│  Step 4: Authority‑Aware Rerank                        │
+│  Combine graph confidence + vector relevance           │
+│  → Final ranked result set with graphFacts + paths     │
+└─────────────────────────────────────────────────────────┘
+```
+
+### 4. Unified Pipeline — Combining All Paths
+
+The unified pipeline runs graph traversal and hybrid search in parallel, then fuses the results:
+
+```
+Query
+    │
+    ├──► GraphRAGPipeline (graph traversal + context fusion)
+    │       → graphFacts, graphPaths, confidence scores
+    │
+    ├──► NEREnrichedRetrievalPipeline (NER + hybrid + rerank)
+    │       → vector search results with entity filtering
+    │
+    ├──► ContextFusion (merge graph + vector results)
+    │       → Combined result set with confidence tags
+    │
+    └──► AuthorityAwareReranker (rerank fused results)
+            → Final ranked results
+```
+
+### 5. Agentic Retrieval Loop (Coordinator)
+
+The `/ask` endpoint uses a bounded Planner–Executor–Judge architecture:
 
 ```
 Observation { query, sessionId, results, rerankedResults, previousActions, iteration, contextPayload }
     │
     ▼
 ┌─────────────────────────────────────────────────────────────┐
-│  Coordinator.run(observation, goal)                         │
+│  Coordinator.run(observation, goal)                          │
 │                                                              │
-│  ┌───────────────────────────────────────────────────────┐ │
-│  │ 1. _buildContext(obs)                                 │ │
-│  │    ├─ Fetch or create thread via PostgresThreadManager│ │
-│  │    ├─ Add user query as message to thread             │ │
-│  │    ├─ Map rerankedResults → RAG context docs          │ │
-│  │    ├─ Call ContextWindowManager.buildContext()         │ │
-│  │    │   (system prompt + RAG context + recent messages)│ │
-│  │    └─ Attach contextPayload to observation            │ │
-│  └───────────────────────────────────────────────────────┘ │
-│           │                                                │
-│           ▼                                                │
-│  ┌───────────────────────────────────────────────────────┐ │
-│  │ 2. judge.evaluate(obs) → RetrievalAssessment          │ │
-│  │    (quality, completeness, consistency, sourceDiversity,│ │
-│  │     missingEvidence, sufficient)                       │ │
-│  └───────────────────────────────────────────────────────┘ │
-│           │                                                │
-│           ▼                                                │
-│  ┌───────────────────────────────────────────────────────┐ │
-│  │ 3. policy.resolve(assessment, goal, trace, obs)       │ │
-│  │    → Decision { action, rationale, evidence }         │ │
-│  │    Actions: search | increase_topk | rewrite_query    │ │
-│  │              | answer | stop                           │ │
-│  └───────────────────────────────────────────────────────┘ │
-│           │                                                │
-│           ▼                                                │
-│  ┌───────────────────────────────────────────────────────┐ │
-│  │ 4. If answer/stop → return result                     │ │
-│  │    Otherwise → executor.execute(decision, obs)         │ │
-│  │    → Observation.withResults(reranked)                 │ │
-│  │    → Loop (bounded by maxIterations)                   │ │
-│  └───────────────────────────────────────────────────────┘ │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │ 1. _buildContext(obs)                                │   │
+│  │    ├─ Fetch or create thread via PostgresThreadManager│   │
+│  │    ├─ Add user query as message to thread          │   │
+│  │    ├─ Map rerankedResults → RAG context docs       │   │
+│  │    ├─ Call ContextWindowManager.buildContext()        │   │
+│  │    │   (system prompt + RAG context + recent msgs) │   │
+│  │    └─ Attach contextPayload to observation           │   │
+│  └─────────────────────────────────────────────────────┘   │
+│           │                                                   │
+│           ▼                                                   │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │ 2. judge.evaluate(obs) → RetrievalAssessment         │   │
+│  │    quality (relevance), completeness (term coverage),│   │
+│  │    consistency (score variance), sourceDiversity,    │   │
+│  │    missingEvidence { missingConcepts, ambiguousTerms,│   │
+│  │      conflictingEvidence, unsupportedClaims }        │   │
+│  └─────────────────────────────────────────────────────┘   │
+│           │                                                   │
+│           ▼                                                   │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │ 3. policy.resolve(assessment, goal, trace, obs)      │   │
+│  │    → Decision { action, rationale, evidence }        │   │
+│  │    Actions: search | increase_topk | rewrite_query  │   │
+│  │              | answer | stop                          │   │
+│  └─────────────────────────────────────────────────────┘   │
+│           │                                                   │
+│           ▼                                                   │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │ 4. If answer/stop → return result                    │   │
+│  │    Otherwise → executor.execute(decision, obs)       │   │
+│  │    → Observation.withResults(reranked)               │   │
+│  │    → Loop (bounded by maxIterations)                  │   │
+│  └─────────────────────────────────────────────────────┘   │
+│           │                                                   │
+│           ▼                                                   │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │ 5. If answer → inference.generateChat()              │   │
+│  │    (in /ask HTTP handler, after agentic loop)        │   │
+│  │    → Final answer stored in thread + returned       │   │
+│  └─────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-### Context‑Aware Chat Layer
+### 6. Context‑Aware Chat Layer
 
 The system maintains per‑session conversation threads and builds optimized context windows for LLM calls:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  ContextWindowManager.buildContext(thread, systemPrompt,    │
-│                                     ragContext, responseTokens)│
+│  ContextWindowManager.buildContext(thread, systemPrompt,      │
+│                                   ragContext, responseTokens)│
 │                                                              │
-│  1. Count tokens: systemPrompt + RAG context + response     │
+│  1. Count tokens: systemPrompt + RAG context + response │
 │  2. Compute messageBudget = modelContextWindow - used       │
 │  3. If messageBudget <= 0 → warn, use 4000‑token floor     │
 │  4. Backward‑fit recent messages within budget              │
@@ -110,27 +316,27 @@ The system maintains per‑session conversation threads and builds optimized con
 └─────────────────────────────────────────────────────────────┘
 ```
 
-### Thread & Session Management
+### 7. Thread & Session Management
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  PostgresThreadManager (primary)                           │
+│  PostgresThreadManager (primary)                             │
 │  ├─ getOrCreate(sessionId) → Thread with messages          │
-│  ├─ addMessage(sessionId, Message)                         │
+│  ├─ addMessage(sessionId, Message)                           │
 │  ├─ getThread(sessionId) → Thread with full history        │
 │  ├─ updateSummary(sessionId, summary, lastSummarizedIndex) │
 │  ├─ listThreads(filters) → [{ sessionId, summary, ... }]   │
-│  └─ close() → pool.end()                                   │
+│  └─ close() → pool.end()                                     │
 │                                                              │
 │  Graceful degradation: if Postgres is unavailable:          │
 │  ├─ _init() catches connection error → sets _disabled flag │
 │  ├─ getOrCreate() → returns in‑memory Thread (empty)       │
-│  ├─ addMessage() → no‑op                                   │
-│  └─ listThreads() → returns []                              │
+│  ├─ addMessage() → no‑op                                     │
+│  └─ listThreads() → returns []                                │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-### AbortController Cancellation
+### 8. AbortController Cancellation
 
 Every expensive operation supports cancellation via `AbortSignal`:
 
@@ -145,6 +351,7 @@ Signal propagated through full async chain:
   AgenticRetrievalPipeline.run()
     → GraphRAGPipeline.run()
     → NEREnrichedRetrievalPipeline.run()
+    → UnifiedRetrievalPipeline.retrieve()
     → inference.generateChat()  (passed to fetch() signal option)
     → threadManager.getOrCreate/addMessage/getThread()
     → contextWindowManager.buildContext()
@@ -163,115 +370,96 @@ AbortError caught silently → no response sent → resources freed
 ## 📂 Source Layout
 
 ```
-rag-server.js                  # CLI entry: parse argv → dispatch
+rag-server.js                           # CLI entry: parse argv → dispatch
 src/
 ├── api/
-│   └── server.js              # RAGServer: HTTP + WebSocket + SSE
+│   └── server.js                       # RAGServer: HTTP + WebSocket + SSE
 ├── agentic/
-│   ├── coordinator.js         # Coordinator: runs the Planner–Executor–Judge loop
-│   ├── decision.js            # Decision { action, rationale, evidence, priority }
-│   ├── evaluation/
-│   │   ├── golden-dataset.js  # GoldenDataset: fixture storage + capture
-│   │   ├── replay.js          # ReplayHarness: offline policy evaluation
-│   │   └── capture.js         # captureFixture helper
-│   ├── judge.js               # RetrievalJudge (heuristic) + LLMJudge (LLM‑backed)
-│   ├── observation.js         # Observation: shared state (query, results, sessionId, contextPayload)
-│   ├── pipeline.js            # AgenticRetrievalPipeline: wires Coordinator + strategy
-│   ├── policy.js              # RetrievalPolicy abstract base
+│   ├── coordinator.js                  # Coordinator: runs the Planner–Executor–Judge loop
+│   ├── assessment.js                   # RetrievalAssessment (quality, completeness, consistency, diversity)
+│   ├── decision.js                     # Decision { action, rationale, evidence, priority }
+│   ├── executor.js                     # RetrievalExecutor: hybrid search + rerank
+│   ├── judge.js                        # RetrievalJudge (heuristic) + LLMJudge (LLM‑backed)
+│   ├── observation.js                  # Observation: shared state (query, results, sessionId, contextPayload)
+│   ├── pipeline.js                     # AgenticRetrievalPipeline: wires Coordinator + strategy
+│   ├── policy.js                       # RetrievalPolicy abstract base
+│   ├── query-rewriter.js              # LLMQueryRewriter (query expansion)
+│   ├── trace.js                        # Trace + TraceEvent (event log for observability)
 │   ├── strategies/
-│   │   └── heuristic.js       # HeuristicRetrievalStrategy (legacy, no thread/context)
+│   │   └── heuristic.js                # HeuristicRetrievalStrategy (composes planner+executor+judge)
 │   └── policies/
-│       ├── heuristic.js       # HeuristicRetrievalPolicy (rule‑based)
-│       ├── llm.js             # LLMPolicy (LLM‑driven decision making)
-│       ├── balanced.js        # BalancedPolicy (production default)
-│       ├── aggressive.js      # AggressiveRetrievalPolicy (max recall)
-│       └── lowlatency.js      # LowLatencyRetrievalPolicy (speed over quality)
+│       ├── heuristic.js                # HeuristicRetrievalPolicy (rule‑based)
+│       ├── llm.js                      # LLMPolicy (LLM‑driven decision making)
+│       ├── balanced.js                 # BalancedPolicy (production default)
+│       ├── aggressive.js               # AggressiveRetrievalPolicy (max recall)
+│       └── lowlatency.js               # LowLatencyRetrievalPolicy (speed over quality)
 ├── inference/
-│   ├── mock.js                # MockInference (deterministic, no API key)
-│   └── novita.js              # NovitaInference (real DeepSeek via Novita API)
+│   ├── mock.js                         # MockInference (deterministic, no API key)
+│   └── novita.js                       # NovitaInference (real DeepSeek via Novita API)
 ├── ingestion/
-│   ├── pipeline.js            # ConcreteInjectionPipeline + runIncremental()
-│   ├── registry.js            # DocRegistry + hashContent (diff classifier)
+│   ├── pipeline.js                     # ConcreteInjectionPipeline + runIncremental()
+│   ├── registry.js                     # DocRegistry + hashContent (diff classifier)
 │   ├── authority/
-│   │   └── mock-annotator.js  # MockProvenanceAnnotator (authority_signal)
+│   │   └── mock-annotator.js           # MockProvenanceAnnotator (authority_signal)
 │   ├── graph/
-│   │   ├── store.js           # Neo4jGraphStore (graph triples + relationships)
-│   │   ├── mock-extractor.js  # MockEntityExtractor
-│   │   └── mock-store.js      # MockGraphStore
+│   │   ├── store.js                    # Neo4jGraphStore (graph triples + relationships)
+│   │   ├── mock-extractor.js           # MockEntityExtractor
+│   │   └── mock-store.js               # MockGraphStore
 │   └── loaders/
-│       ├── mock.js            # MockDocumentLoader
-│       └── real.js            # RealDocumentLoader
+│       ├── mock.js                     # MockDocumentLoader
+│       └── real.js                     # RealDocumentLoader
 ├── retrieval/
-│   ├── pipeline.js            # NEREnrichedRetrievalPipeline (NER + hybrid + rerank)
-│   ├── graph-rag.js           # GraphRAGPipeline (graph traversal + vector + fusion)
-│   ├── unified-pipeline.js    # UnifiedRetrievalPipeline (graph + hybrid + NER)
+│   ├── pipeline.js                     # NEREnrichedRetrievalPipeline (NER + hybrid + rerank)
+│   ├── graph-rag.js                    # GraphRAGPipeline (graph traversal + vector + fusion)
+│   ├── unified-pipeline.js             # UnifiedRetrievalPipeline (graph + hybrid + NER)
 │   ├── authority/
-│   │   └── mock-scorer.js     # StaticDictionaryScorer (baseline scoring)
+│   │   └── mock-scorer.js              # StaticDictionaryScorer (baseline scoring)
 │   ├── graph/
-│   │   └── mock-fuser.js      # MockContextFuser (confidence‑tagged fact fusion)
+│   │   └── mock-fuser.js               # MockContextFuser (confidence‑tagged fact fusion)
 │   ├── ner/
-│   │   ├── glossary.js        # AcronymGlossary (acronym expansion)
-│   │   ├── mock-extractor.js  # MockEntityExtractor (DRUG, DISEASE, BIOMARKER)
-│   │   ├── mock-filter.js     # MockMetadataFilter (post‑filter by entity)
-│   │   └── mock-glossary.js   # MockAcronymGlossary
+│   │   ├── glossary.js                 # AcronymGlossary (acronym expansion)
+│   │   ├── mock-extractor.js           # MockEntityExtractor (DRUG, DISEASE, BIOMARKER)
+│   │   ├── mock-filter.js              # MockMetadataFilter (post‑filter by entity)
+│   │   └── mock-glossary.js            # MockAcronymGlossary
 │   ├── embedders/
-│   │   ├── mock.js            # MockEmbedder (deterministic, content‑correlated)
-│   │   └── gemini.js          # GeminiEmbedder (real embeddings)
+│   │   ├── mock.js                     # MockEmbedder (deterministic, content‑correlated)
+│   │   └── gemini.js                   # GeminiEmbedder (real embeddings)
 │   ├── stores/
-│   │   ├── mock.js            # MockVectorStore (in‑memory)
-│   │   ├── chroma.js          # ChromaVectorStore (persistent vector DB)
-│   │   ├── bm25.js            # BM25Store (inline keyword index)
-│   │   └── hybrid.js          # HybridStore (vector + BM25 + RRF fusion)
+│   │   ├── mock.js                     # MockVectorStore (in‑memory)
+│   │   ├── chroma.js                   # ChromaVectorStore (persistent vector DB)
+│   │   ├── bm25.js                     # BM25Store (inline keyword index)
+│   │   └── hybrid.js                   # HybridStore (vector + BM25 + RRF fusion)
 │   └── rerankers/
-│       ├── mock.js            # MockReranker (word‑overlap heuristic)
-│       ├── real.js            # CrossEncoderReranker (semantic reranking)
-│       └── authority-aware.js # AuthorityAwareReranker (scorer + semantic)
+│       ├── mock.js                     # MockReranker (word‑overlap heuristic)
+│       ├── real.js                     # CrossEncoderReranker (semantic reranking)
+│       └── authority-aware.js          # AuthorityAwareReranker (scorer + semantic)
 ├── session/
-│   ├── postgres-thread-manager.js  # PostgresThreadManager (primary, with graceful degradation)
-│   ├── thread-manager-factory.js   # createThreadManager() factory
-│   └── conversation.js        # ConversationStore (file‑based fallback)
+│   ├── postgres-thread-manager.js      # PostgresThreadManager (primary, with graceful degradation)
+│   ├── thread-manager-factory.js       # createThreadManager() factory
+│   └── conversation.js                 # ConversationStore (file‑based fallback)
 ├── shared/
-│   ├── chunker.js             # chunkText (paragraph/sentence‑aware splitting)
-│   ├── config.js              # Environment constants (MODEL_CONTEXT_WINDOW, etc.)
-│   ├── events.js              # ServerEvents bus + metrics
-│   ├── interfaces.js          # Thread, Message, Observation, RetrievalPolicy, Decision
-│   ├── token-counter.js       # TokenCounter (tiktoken fallback → char/4)
-│   ├── message-summarizer.js  # MessageSummarizer (compresses old messages)
-│   └── context-window-manager.js  # ContextWindowManager (budget‑aware message fitting)
-├── agentic/
-│   ├── coordinator.js         # Coordinator: runs the Planner–Executor–Judge loop
-│   ├── assessment.js          # RetrievalAssessment (quality, completeness, consistency, diversity)
-│   ├── decision.js            # Decision { action, rationale, evidence, priority }
-│   ├── executor.js            # RetrievalExecutor: hybrid search + rerank
-│   ├── judge.js               # RetrievalJudge (heuristic) + LLMJudge (LLM‑backed)
-│   ├── observation.js         # Observation: shared state (query, results, sessionId, contextPayload)
-│   ├── pipeline.js            # AgenticRetrievalPipeline: wires Coordinator + strategy
-│   ├── policy.js              # RetrievalPolicy abstract base
-│   ├── query-rewriter.js      # LLMQueryRewriter (query expansion)
-│   ├── trace.js               # Trace + TraceEvent (event log for observability)
-│   ├── strategies/
-│   │   └── heuristic.js       # HeuristicRetrievalStrategy (composes planner+executor+judge)
-│   └── policies/
-│       ├── heuristic.js       # HeuristicRetrievalPolicy (rule‑based)
-│       ├── llm.js             # LLMPolicy (LLM‑driven decision making)
-│       ├── balanced.js        # BalancedPolicy (production default)
-│       ├── aggressive.js      # AggressiveRetrievalPolicy (max recall)
-│       └── lowlatency.js      # LowLatencyRetrievalPolicy (speed over quality)
-├── evaluation/
-│   ├── golden-dataset.js      # GoldenDataset fixture management
-│   ├── replay.js              # ReplayHarness offline policy evaluation
-│   └── capture.js             # captureFixture helper
+│   ├── chunker.js                      # chunkText (paragraph/sentence‑aware splitting)
+│   ├── config.js                       # Environment constants (MODEL_CONTEXT_WINDOW, etc.)
+│   ├── events.js                       # ServerEvents bus + metrics
+│   ├── interfaces.js                   # Thread, Message, Observation, RetrievalPolicy, Decision
+│   ├── token-counter.js                # TokenCounter (tiktoken fallback → char/4)
+│   ├── message-summarizer.js           # MessageSummarizer (compresses old messages)
+│   └── context-window-manager.js       # ContextWindowManager (budget‑aware message fitting)
+└── evaluation/
+    ├── golden-dataset.js               # GoldenDataset fixture management
+    ├── replay.js                       # ReplayHarness offline policy evaluation
+    └── capture.js                      # captureFixture helper
 tests/
-├── runner.js                  # TestRunner + Assert
-├── mock.test.js               # --test (chunking, embedding, store basics)
-├── advanced.test.js           # --advanced-test (reranking, agentic, hybrid, Coordinator)
-├── context.test.js            # --context-test (TokenCounter, ContextWindowManager, Thread/Message, Postgres graceful degradation)
-├── phase2-3.test.js           # --phase23-test (policies, rationale, evidence)
-├── phase5.test.js             # --phase5-test (LLMPolicy, GoldenDataset, ReplayHarness)
-├── unified.test.js            # --unified-test (architecture validation)
-├── real.test.js               # --real-test (live integration)
-├── delta.test.js              # --delta-test (incremental sync)
-└── chroma.test.js             # --chroma-test (Chroma delete‑by‑doc‑id)
+├── runner.js                           # TestRunner + Assert
+├── mock.test.js                        # --test (chunking, embedding, store basics)
+├── advanced.test.js                    # --advanced-test (reranking, agentic, hybrid, Coordinator)
+├── context.test.js                     # --context-test (TokenCounter, ContextWindowManager, Thread/Message, Postgres graceful degradation)
+├── phase2-3.test.js                    # --phase23-test (policies, rationale, evidence)
+├── phase5.test.js                      # --phase5-test (LLMPolicy, GoldenDataset, ReplayHarness)
+├── unified.test.js                     # --unified-test (architecture validation)
+├── real.test.js                        # --real-test (live integration)
+├── delta.test.js                       # --delta-test (incremental sync)
+└── chroma.test.js                      # --chroma-test (Chroma delete‑by‑doc‑id)
 ```
 
 ---
@@ -334,7 +522,7 @@ Action chosen by the policy:
 | GET | `/metrics` | Real‑time server metrics |
 | GET | `/stats` | Vector store statistics |
 | GET | `/events` | SSE real‑time event stream |
-| POST | `/inject` | Full rebuild: clear + chunk + embed + store |
+| POST | `/inject` | Full rebuild: clear + chunk + NER tag + embed + store |
 | POST | `/inject-incremental` | Differential sync: hash‑diff, re‑embed only delta |
 | POST | `/clear` | Clear vector store + graph store + registry |
 | POST | `/retrieve` | Hybrid retrieval (vector + BM25 + RRF) |
@@ -355,13 +543,6 @@ Action chosen by the policy:
 | `request:ask` | `{"type":"request:ask","query":"...","sessionId":"...","topK":3}` | `{"type":"ask:result","data":{...}}` |
 | `request:capture-fixture` | `{...fixture config...}` | `{"type":"capture-fixture:result","data":{...}}` |
 | `ping` | `{"type":"ping"}` | `{"type":"pong","timestamp":...}` |
-
-### Key Directories
-
-- **`./input/`** – Place your `.md` files here. Injection reads from this folder.
-- **`./conversations/`** – JSON files storing chat history per `sessionId`.
-- **`./data/doc-registry.json`** – Registry of what is embedded (`docId → {hash, size, mtime, chunkCount, lastIndexedAt}`); the source of truth used by incremental sync.
-- **`./public/dashboard.html`** – Built-in monitoring/control UI served by the RAG server.
 
 ---
 
