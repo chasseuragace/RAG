@@ -55,7 +55,7 @@ class AgenticRetrievalPipeline extends RetrievalPipeline {
         trace: result.trace ? result.trace.toArray() : [],
         goal: result.goal || this.goal,
         steps: result.trace ? result.trace.toArray() : [],
-        results: final.map(r => ({ id: r.id, relevance: (r.score * 100).toFixed(2) + '%', metadata: r.metadata, rerankReason: r.rerankReason }))
+        results: final.map(r => ({ id: r.id, relevance: (r.score * 100).toFixed(2) + '%', score: r.score, metadata: r.metadata, rerankReason: r.rerankReason }))
       };
     } catch (err) {
       serverEvents.logEvent('error', { stage: 'agentic', message: err.message });

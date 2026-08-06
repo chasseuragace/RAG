@@ -185,7 +185,7 @@ class GoldenDataset {
         `captured-with:${pipelineMode}`,
         ...(tags.includes('verified-by:human') ? [] : ['verified-by:human']),
       ],
-      ...(captureChunks ? { retrievedChunks: (result.results || []).map(r => ({ id: r.id, relevance: r.relevance, content: r.metadata?.content || '' })) } : {}),
+      ...(captureChunks ? { retrievedChunks: (result.results || []).map(r => ({ id: r.id, relevance: r.score, content: r.metadata?.content || '' })) } : {}),
     };
 
     return this.upsert(record);
