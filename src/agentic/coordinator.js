@@ -94,14 +94,19 @@ class Coordinator {
     // blindly returning 'stop'. This handles the common case where the last
     // iteration performed a retrieval action and the results are now sufficient.
     const finalAssessment = await this.judge.evaluate(obs);
-    const finalDecision = await this.policy.resolve(finalAssessment, goal, trace);
+    const finalDecision = await this.policy.resolve(finalAssessment, { ...goal, finalPass: true }, trace);
     const resolvedAction = (finalDecision.action === 'answer') ? 'answer' : 'stop';
     const resolvedRationale = (finalDecision.action === 'answer')
       ? finalDecision.rationale
-      : 'max_iterations_reached';
+      : `max_iterations_reached (policy wanted: ${finalDecision.action} — ${finalDecision.rationale})`;
     const resolvedEvidence = (finalDecision.action === 'answer')
       ? finalDecision.evidence
-      : { iterations: goal.maxIterations };
+      : {
+          iterations: goal.maxIterations,
+          wantedAction: finalDecision.action,
+          wantedRationale: finalDecision.rationale,
+          wantedEvidence: finalDecision.evidence,
+        };
 
     serverEvents.logEvent('agentic:strategy:complete', {
       iterations: goal.maxIterations,

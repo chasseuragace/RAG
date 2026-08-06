@@ -1,10 +1,12 @@
 const { serverEvents } = require('../events');
+const { HeuristicQueryRewriter, LLMQueryRewriter } = require('./query-rewriter');
 
 class RetrievalExecutor {
-  constructor(embedder, hybridStore, reranker) {
+  constructor(embedder, hybridStore, reranker, queryRewriter) {
     this.embedder = embedder;
     this.hybridStore = hybridStore;
     this.reranker = reranker;
+    this.queryRewriter = queryRewriter || new HeuristicQueryRewriter();
   }
 
   async execute(action, observation) {
@@ -20,7 +22,7 @@ class RetrievalExecutor {
         return this._search(observation, observation.topK * 2, 'increase_topk');
 
       case 'rewrite_query': {
-        const expandedQuery = this._rewriteQuery(observation);
+        const expandedQuery = await this.queryRewriter.rewrite(observation.query, observation, action.rationale || action.reason, action.evidence);
         const newObs = observation.withAction({ type: 'rewrite_query', expandedQuery, reason: action.rationale || action.reason });
         return this._search(newObs, newObs.topK, 'rewrite_query', expandedQuery);
       }
@@ -47,14 +49,6 @@ class RetrievalExecutor {
     serverEvents.logEvent('agentic:search', { query, topK, resultCount: reranked.length, duration, actionType });
     const newObs = observation.withResults(reranked);
     return newObs.withAction({ type: actionType, query, resultCount: reranked.length, duration });
-  }
-
-  _rewriteQuery(observation) {
-    const topWords = observation.rerankedResults.slice(0, 2).flatMap(d =>
-      (d.metadata.content || '').toLowerCase().split(/\s+/).filter(w => w.length > 4)
-    ).slice(0, 5);
-    const expanded = `${observation.originalQuery} ${topWords.join(' ')}`.trim();
-    return expanded.length > observation.originalQuery.length ? expanded : observation.originalQuery;
   }
 }
 

@@ -22,6 +22,7 @@ const { RetrievalPolicy } = require('../policy');
 const { Decision } = require('../decision');
 const { HeuristicRetrievalPolicy } = require('./heuristic');
 const { serverEvents } = require('../../events');
+const { extractJson } = require('../lib/llm-json');
 
 const VALID_ACTIONS = ['answer', 'increase_topk', 'rewrite_query', 'stop'];
 
@@ -57,7 +58,7 @@ class LLMPolicy extends RetrievalPolicy {
       return this._fallback(assessment, goal, trace, `inference_error: ${err.message}`);
     }
 
-    const parsed = this._parse(raw);
+    const parsed = extractJson(raw);
     if (!parsed) {
       serverEvents.logEvent('llm:policy:error', { stage: 'parse', raw });
       return this._fallback(assessment, goal, trace, `parse_error: could not extract JSON from response`);
@@ -81,11 +82,14 @@ class LLMPolicy extends RetrievalPolicy {
     );
   }
 
-  // ─── prompt construction ────────────────────────────────────────────────────
 
   _buildPrompt(assessment, goal, trace) {
     const priorActions = this._priorActions(trace);
     const missingConcepts = assessment.missingEvidence?.missingConcepts || [];
+    const isFinalPass = goal.finalPass === true;
+    const validActions = isFinalPass
+      ? ['answer', 'stop']
+      : ['answer', 'increase_topk', 'rewrite_query', 'stop'];
 
     return `You are a retrieval quality judge deciding the next action for a RAG pipeline.
 
@@ -100,24 +104,31 @@ class LLMPolicy extends RetrievalPolicy {
 - objective: ${goal.objective || 'BALANCED'}
 - minimumQuality: ${goal.minimumQuality ?? 0.5}
 - maxIterations: ${goal.maxIterations ?? 2}
+${isFinalPass ? '- **This is the final iteration — only \'answer\' or \'stop\' are available.**' : ''}
 
 ## Prior actions taken this iteration
 ${priorActions.length > 0 ? priorActions.map((a, i) => `  ${i + 1}. ${a}`).join('\n') : '  none'}
 
 ## Valid actions
-- answer          — evidence is sufficient, return results to the user
-- increase_topk   — fetch more candidate documents
-- rewrite_query   — reformulate the query to improve coverage
-- stop            — evidence is insufficient and further retrieval will not help
+${validActions.map(a => `- ${a}  — ${a === 'answer' ? 'evidence is sufficient, return results to the user' : a === 'stop' ? 'evidence is insufficient and further retrieval will not help' : a === 'increase_topk' ? 'fetch more candidate documents' : 'reformulate the query to improve coverage'}`).join('\n')}
 
 ## Instructions
 Respond with ONLY a JSON object on a single line. No markdown, no explanation outside the JSON.
 The JSON must have exactly these keys: action, rationale, evidence.
-- action: one of the valid actions above
+- action: one of the valid actions listed above (no others are accepted)
 - rationale: one sentence explaining why
 - evidence: an object with 1-3 key/value pairs supporting your reasoning
 
-Example: {"action":"answer","rationale":"Quality and completeness are both above threshold.","evidence":{"quality":0.82,"completeness":0.91}}`;
+${isFinalPass
+  ? `Examples (final pass — only answer or stop):
+{"action":"answer","rationale":"Quality meets threshold despite low completeness.","evidence":{"quality":0.62,"completeness":0.45}}
+{"action":"stop","rationale":"Quality is too low and no further retrieval actions are available.","evidence":{"quality":0.28,"missingConcepts":2}}`
+  : `Examples:
+{"action":"answer","rationale":"Quality and completeness are both above threshold.","evidence":{"quality":0.82,"completeness":0.91}}
+{"action":"increase_topk","rationale":"Coverage is low; fetching more candidates may surface missing terms.","evidence":{"completeness":0.31,"missingConcepts":3}}
+{"action":"rewrite_query","rationale":"Top result score is poor; reformulating the query should improve relevance.","evidence":{"quality":0.38,"topScore":0.29}}
+{"action":"stop","rationale":"Results are too sparse and the query has already been rewritten once.","evidence":{"quality":0.21,"priorRewrites":1}}`
+}`;
   }
 
   _priorActions(trace) {
@@ -127,31 +138,6 @@ Example: {"action":"answer","rationale":"Quality and completeness are both above
       .map(e => e.action?.action || e.action?.type || 'unknown');
   }
 
-  // ─── response parsing ───────────────────────────────────────────────────────
-
-  /**
-   * Extract the first valid JSON object from the LLM response string.
-   * The LLM may wrap it in markdown fences or add preamble — we strip those.
-   */
-  _parse(raw) {
-    if (typeof raw !== 'string' || raw.trim().length === 0) return null;
-
-    // Strip markdown code fences if present
-    const stripped = raw.replace(/```(?:json)?/gi, '').replace(/```/g, '').trim();
-
-    // Find the first { ... } block
-    const start = stripped.indexOf('{');
-    const end = stripped.lastIndexOf('}');
-    if (start === -1 || end === -1 || end <= start) return null;
-
-    try {
-      const obj = JSON.parse(stripped.slice(start, end + 1));
-      if (typeof obj.action !== 'string') return null;
-      return obj;
-    } catch (_) {
-      return null;
-    }
-  }
 
   // ─── fallback ────────────────────────────────────────────────────────────────
 

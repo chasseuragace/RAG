@@ -14,6 +14,23 @@ class HeuristicRetrievalPolicy extends RetrievalPolicy {
   resolve(assessment, goal, trace) {
     const { missingEvidence, completeness, quality, sourceDiversity } = assessment;
 
+    if (goal.finalPass) {
+      if (quality >= this.mediumScoreThreshold) {
+        return Decision.create(
+          'answer',
+          `final_pass: quality=${quality.toFixed(2)}, completeness=${completeness.toFixed(2)}`,
+          { quality, completeness, sourceDiversity },
+          'normal'
+        );
+      }
+      return Decision.create(
+        'stop',
+        `final_pass: quality=${quality.toFixed(2)} below threshold, no more iterations`,
+        { quality, threshold: this.mediumScoreThreshold },
+        'high'
+      );
+    }
+
     if (quality >= this.mediumScoreThreshold && completeness >= 0.6) {
       return Decision.create(
         'answer',

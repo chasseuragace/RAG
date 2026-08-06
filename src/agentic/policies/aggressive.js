@@ -22,6 +22,25 @@ class AggressiveRetrievalPolicy extends RetrievalPolicy {
   resolve(assessment, goal, trace) {
     const { missingEvidence, completeness, quality, sourceDiversity } = assessment;
 
+    if (goal.finalPass) {
+      if (quality >= this.answerQualityThreshold && completeness >= this.answerCompletenessThreshold) {
+        serverEvents.logEvent('agentic:policy:aggressive', { action: 'answer', reason: 'final_pass', quality, completeness });
+        return Decision.create(
+          'answer',
+          `final_pass: high_confidence_evidence: quality=${quality.toFixed(2)}, completeness=${completeness.toFixed(2)}`,
+          { quality, completeness, sourceDiversity },
+          'normal'
+        );
+      }
+      serverEvents.logEvent('agentic:policy:aggressive', { action: 'stop', reason: 'final_pass_insufficient', quality, completeness });
+      return Decision.create(
+        'stop',
+        `final_pass: quality=${quality.toFixed(2)}, completeness=${completeness.toFixed(2)} below thresholds, no more iterations`,
+        { quality, completeness, thresholds: { quality: this.answerQualityThreshold, completeness: this.answerCompletenessThreshold } },
+        'high'
+      );
+    }
+
     const rewriteCount = trace
       ? trace.events.filter(e => (e.action?.action || e.action?.type) === 'rewrite_query').length
       : 0;

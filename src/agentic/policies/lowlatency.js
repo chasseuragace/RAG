@@ -19,6 +19,25 @@ class LowLatencyPolicy extends RetrievalPolicy {
   resolve(assessment, goal, trace) {
     const { quality, completeness, sourceDiversity } = assessment;
 
+    if (goal.finalPass) {
+      if (quality >= this.answerQualityThreshold) {
+        serverEvents.logEvent('agentic:policy:lowlatency', { action: 'answer', reason: 'final_pass', quality });
+        return Decision.create(
+          'answer',
+          `final_pass: fast_answer: quality=${quality.toFixed(2)} meets low-latency threshold`,
+          { quality, completeness, sourceDiversity, threshold: this.answerQualityThreshold },
+          'high'
+        );
+      }
+      serverEvents.logEvent('agentic:policy:lowlatency', { action: 'stop', reason: 'final_pass_low_quality', quality });
+      return Decision.create(
+        'stop',
+        `final_pass: quality=${quality.toFixed(2)} below threshold, no more iterations`,
+        { quality, threshold: this.answerQualityThreshold },
+        'high'
+      );
+    }
+
     // Check if retrieval has already been attempted (execute events in trace).
     const hasAttemptedRetrieval = trace
       ? trace.events.some(e => e.phase === 'execute')

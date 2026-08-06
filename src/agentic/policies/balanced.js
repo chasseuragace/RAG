@@ -23,6 +23,25 @@ class BalancedPolicy extends RetrievalPolicy {
   resolve(assessment, goal, trace) {
     const { missingEvidence, completeness, quality, sourceDiversity } = assessment;
 
+    if (goal.finalPass) {
+      if (quality >= this.answerQualityThreshold) {
+        serverEvents.logEvent('agentic:policy:balanced', { action: 'answer', reason: 'final_pass', quality });
+        return Decision.create(
+          'answer',
+          `final_pass: quality=${quality.toFixed(2)}, completeness=${completeness.toFixed(2)}`,
+          { quality, completeness, sourceDiversity, thresholds: { quality: this.answerQualityThreshold, completeness: this.answerCompletenessThreshold } },
+          'normal'
+        );
+      }
+      serverEvents.logEvent('agentic:policy:balanced', { action: 'stop', reason: 'final_pass_low_quality', quality });
+      return Decision.create(
+        'stop',
+        `final_pass: quality=${quality.toFixed(2)} below threshold, no more iterations`,
+        { quality, threshold: this.answerQualityThreshold },
+        'high'
+      );
+    }
+
     const rewriteCount = trace
       ? trace.events.filter(e => (e.action?.action || e.action?.type) === 'rewrite_query').length
       : 0;

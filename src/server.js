@@ -23,6 +23,8 @@ const { MockReranker } = require('./rerankers/mock');
 const { CrossEncoderReranker } = require('./rerankers/real');
 const { NovitaInference } = require('./inference/novita');
 const { MockInference } = require('./inference/mock');
+const { LLMJudge } = require('./agentic/judge');
+const { LLMQueryRewriter, HeuristicQueryRewriter } = require('./agentic/query-rewriter');
 const { ConcreteInjectionPipeline } = require('./pipelines/injection');
 const { ConcreteRetrievalPipeline, HybridRetrievalPipeline } = require('./pipelines/retrieval');
 const { AgenticRetrievalPipeline } = require('./pipelines/agentic-retrieval');
@@ -70,15 +72,17 @@ class RAGServer {
       const hybrid = new HybridStore(store, bm25);
       const loader = new RealDocumentLoader();
       const reranker = new CrossEncoderReranker();
-      this.inference = new NovitaInference();
-      this.injectionPipeline = new ConcreteInjectionPipeline(loader, embedder, hybrid);
-      this.retrievalPipeline = new HybridRetrievalPipeline(embedder, hybrid);
-      this.agenticPipeline = new AgenticRetrievalPipeline(embedder, hybrid, reranker, {
-        objective: RetrievalObjectives.BALANCED,
-        latencyBudget: 5000,
-        maxIterations: 2,
-        minimumQuality: 0.5
-      });
+       this.inference = new NovitaInference();
+       const judge = new LLMJudge(this.inference);
+       const queryRewriter = new LLMQueryRewriter(this.inference);
+       this.injectionPipeline = new ConcreteInjectionPipeline(loader, embedder, hybrid);
+       this.retrievalPipeline = new HybridRetrievalPipeline(embedder, hybrid);
+       this.agenticPipeline = new AgenticRetrievalPipeline(embedder, hybrid, reranker, {
+         objective: RetrievalObjectives.BALANCED,
+         latencyBudget: 5000,
+         maxIterations: 2,
+         minimumQuality: 0.5
+       }, null, judge, queryRewriter);
       this.store = hybrid;
       this.hybridStore = hybrid;
       this.bm25Store = bm25;
