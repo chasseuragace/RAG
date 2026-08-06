@@ -83,7 +83,9 @@ class GraphRAGPipeline {
 
     try {
       // ── Step 1: Acronym expansion ──────────────────────────────────────────
-      const expandedQuery = this.glossary ? this.glossary.expand(query) : query;
+      const expandedQuery = this.glossary ? await this.glossary.expand(query) : query;
+      // @gotcha `expand()` is async — missing `await` here passed a Promise to NER
+      //       and embedder, and made the equality check always truthy.
       if (expandedQuery !== query) {
         serverEvents.logEvent('graph-rag:expanded', { original: query, expanded: expandedQuery });
       }
