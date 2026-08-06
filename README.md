@@ -191,12 +191,29 @@ src/
 │   └── novita.js              # NovitaInference (real DeepSeek via Novita API)
 ├── ingestion/
 │   ├── pipeline.js            # ConcreteInjectionPipeline + runIncremental()
-│   └── graph/
-│       └── store.js           # Neo4jGraphStore (graph triples + relationships)
+│   ├── registry.js            # DocRegistry + hashContent (diff classifier)
+│   ├── authority/
+│   │   └── mock-annotator.js  # MockProvenanceAnnotator (authority_signal)
+│   ├── graph/
+│   │   ├── store.js           # Neo4jGraphStore (graph triples + relationships)
+│   │   ├── mock-extractor.js  # MockEntityExtractor
+│   │   └── mock-store.js      # MockGraphStore
+│   └── loaders/
+│       ├── mock.js            # MockDocumentLoader
+│       └── real.js            # RealDocumentLoader
 ├── retrieval/
 │   ├── pipeline.js            # NEREnrichedRetrievalPipeline (NER + hybrid + rerank)
 │   ├── graph-rag.js           # GraphRAGPipeline (graph traversal + vector + fusion)
 │   ├── unified-pipeline.js    # UnifiedRetrievalPipeline (graph + hybrid + NER)
+│   ├── authority/
+│   │   └── mock-scorer.js     # StaticDictionaryScorer (baseline scoring)
+│   ├── graph/
+│   │   └── mock-fuser.js      # MockContextFuser (confidence‑tagged fact fusion)
+│   ├── ner/
+│   │   ├── glossary.js        # AcronymGlossary (acronym expansion)
+│   │   ├── mock-extractor.js  # MockEntityExtractor (DRUG, DISEASE, BIOMARKER)
+│   │   ├── mock-filter.js     # MockMetadataFilter (post‑filter by entity)
+│   │   └── mock-glossary.js   # MockAcronymGlossary
 │   ├── embedders/
 │   │   ├── mock.js            # MockEmbedder (deterministic, content‑correlated)
 │   │   └── gemini.js          # GeminiEmbedder (real embeddings)
@@ -207,21 +224,43 @@ src/
 │   │   └── hybrid.js          # HybridStore (vector + BM25 + RRF fusion)
 │   └── rerankers/
 │       ├── mock.js            # MockReranker (word‑overlap heuristic)
-│       └── real.js            # CrossEncoderReranker (semantic reranking)
+│       ├── real.js            # CrossEncoderReranker (semantic reranking)
+│       └── authority-aware.js # AuthorityAwareReranker (scorer + semantic)
 ├── session/
-│   ├── postgres-thread-manager.js  # PostgresThreadManager (primary)
-│   └── thread-manager-factory.js   # createThreadManager() factory
+│   ├── postgres-thread-manager.js  # PostgresThreadManager (primary, with graceful degradation)
+│   ├── thread-manager-factory.js   # createThreadManager() factory
+│   └── conversation.js        # ConversationStore (file‑based fallback)
 ├── shared/
+│   ├── chunker.js             # chunkText (paragraph/sentence‑aware splitting)
 │   ├── config.js              # Environment constants (MODEL_CONTEXT_WINDOW, etc.)
 │   ├── events.js              # ServerEvents bus + metrics
 │   ├── interfaces.js          # Thread, Message, Observation, RetrievalPolicy, Decision
 │   ├── token-counter.js       # TokenCounter (tiktoken fallback → char/4)
 │   ├── message-summarizer.js  # MessageSummarizer (compresses old messages)
 │   └── context-window-manager.js  # ContextWindowManager (budget‑aware message fitting)
-└── evaluation/
-    ├── golden-dataset.js      # GoldenDataset fixture management
-    ├── replay.js              # ReplayHarness offline policy evaluation
-    └── capture.js             # captureFixture helper
+├── agentic/
+│   ├── coordinator.js         # Coordinator: runs the Planner–Executor–Judge loop
+│   ├── assessment.js          # RetrievalAssessment (quality, completeness, consistency, diversity)
+│   ├── decision.js            # Decision { action, rationale, evidence, priority }
+│   ├── executor.js            # RetrievalExecutor: hybrid search + rerank
+│   ├── judge.js               # RetrievalJudge (heuristic) + LLMJudge (LLM‑backed)
+│   ├── observation.js         # Observation: shared state (query, results, sessionId, contextPayload)
+│   ├── pipeline.js            # AgenticRetrievalPipeline: wires Coordinator + strategy
+│   ├── policy.js              # RetrievalPolicy abstract base
+│   ├── query-rewriter.js      # LLMQueryRewriter (query expansion)
+│   ├── trace.js               # Trace + TraceEvent (event log for observability)
+│   ├── strategies/
+│   │   └── heuristic.js       # HeuristicRetrievalStrategy (composes planner+executor+judge)
+│   └── policies/
+│       ├── heuristic.js       # HeuristicRetrievalPolicy (rule‑based)
+│       ├── llm.js             # LLMPolicy (LLM‑driven decision making)
+│       ├── balanced.js        # BalancedPolicy (production default)
+│       ├── aggressive.js      # AggressiveRetrievalPolicy (max recall)
+│       └── lowlatency.js      # LowLatencyRetrievalPolicy (speed over quality)
+├── evaluation/
+│   ├── golden-dataset.js      # GoldenDataset fixture management
+│   ├── replay.js              # ReplayHarness offline policy evaluation
+│   └── capture.js             # captureFixture helper
 tests/
 ├── runner.js                  # TestRunner + Assert
 ├── mock.test.js               # --test (chunking, embedding, store basics)
@@ -316,6 +355,13 @@ Action chosen by the policy:
 | `request:ask` | `{"type":"request:ask","query":"...","sessionId":"...","topK":3}` | `{"type":"ask:result","data":{...}}` |
 | `request:capture-fixture` | `{...fixture config...}` | `{"type":"capture-fixture:result","data":{...}}` |
 | `ping` | `{"type":"ping"}` | `{"type":"pong","timestamp":...}` |
+
+### Key Directories
+
+- **`./input/`** – Place your `.md` files here. Injection reads from this folder.
+- **`./conversations/`** – JSON files storing chat history per `sessionId`.
+- **`./data/doc-registry.json`** – Registry of what is embedded (`docId → {hash, size, mtime, chunkCount, lastIndexedAt}`); the source of truth used by incremental sync.
+- **`./public/dashboard.html`** – Built-in monitoring/control UI served by the RAG server.
 
 ---
 
